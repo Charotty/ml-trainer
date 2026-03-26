@@ -1,0 +1,112 @@
+# Конфигурация обучения AR Laparoscopy ML Pipeline
+
+# Основные параметры
+training:
+  random_state: 42
+  cv_folds: 5
+  test_size: 0.2
+  val_size: 0.15
+  
+# Модели
+models:
+  types: ["linear", "random_forest", "xgboost", "ensemble"]
+  ensemble_weights:
+    random_forest: 0.5
+    xgboost: 0.5
+  
+  # Параметры моделей
+  linear:
+    fit_intercept: true
+    
+  random_forest:
+    n_estimators: 100
+    max_depth: 10
+    min_samples_split: 5
+    min_samples_leaf: 2
+    random_state: 42
+    
+  xgboost:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.1
+    subsample: 0.8
+    colsample_bytree: 0.8
+    random_state: 42
+
+# Улучшения
+enhancements:
+  use_relative_coordinates: true
+  apply_constraints: true
+  calculate_confidence: true
+  use_unpaired_data: true
+  augmentation_ratio: 0.3
+  
+  # Параметры confidence
+  confidence_threshold: 0.5
+  confidence_method: "ensemble"
+  n_neighbors: 5
+  
+  # Параметры constraints
+  max_shift_magnitude: 150.0  # mm
+  max_shift_x: 80.0          # mm  
+  max_shift_y: 100.0         # mm
+  max_shift_z: 60.0          # mm
+  min_kidney_separation: 50.0 # mm
+
+# Пути к данным
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  train_file: "train.csv"
+  val_file: "validation.csv"
+  test_file: "test.csv"
+  
+  # Непарные данные
+  unpaired:
+    supine_file: "supine_unpaired.csv"
+    lateral_file: "lateral_unpaired.csv"
+    synthetic_generation_method: "gmm"  # gaussian, gmm, copula
+
+# Пути к моделям
+models:
+  output_dir: "models/production"
+  feature_names_file: "feature_names.json"
+  target_names_file: "target_names.json"
+  model_metadata_file: "model_metadata.json"
+  
+  # Сохраняемые артефакты
+  save_artifacts:
+    - "scaler.pkl"
+    - "imputer.pkl"
+    - "random_forest.pkl"
+    - "xgboost_*.pkl"
+    - "baseline_model.pkl"
+
+# Валидация
+validation:
+  metrics: ["mae", "rmse", "max_error", "r2"]
+  success_threshold_mm: 10.0
+  confidence_thresholds: [0.3, 0.5, 0.7, 0.9]
+  
+  # Кросс-валидация
+  cv_scoring: "neg_mean_absolute_error"
+  cv_n_jobs: -1
+
+# Логирование
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/training.log"
+  
+# Отчеты
+reports:
+  output_dir: "reports"
+  generate_html: true
+  generate_plots: true
+  save_metrics: true
+  
+# Производительность
+performance:
+  n_jobs: -1
+  memory_limit: "8GB"
+  use_gpu: false

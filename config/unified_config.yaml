@@ -1,0 +1,184 @@
+# Унифицированная конфигурация для проекта AR Kidney ML
+
+# Режим обучения:
+# segmentation_only - только сегментация (KiTS19)
+# coordinate_prediction_only - только предсказание координат (табличные данные)
+# multi_task - мульти-таск обучение (все источники)
+mode: "multi_task"
+
+# Конфигурация данных
+data:
+  # Источники данных
+  sources:
+    kits19:
+      enabled: true
+      data_dir: "data/kits19"
+      description: "KiTS19 dataset with CT scans and segmentations"
+    
+    tabular:
+      enabled: true
+      data_dir: "data/tabular"
+      description: "Tabular data with kidney displacement coordinates"
+    
+    unpaired_ct:
+      enabled: false
+      data_dir: "data/unpaired_ct"
+      description: "Unpaired CT scans without segmentations"
+  
+  # Разделение данных
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  random_seed: 42
+  
+  # Предобработка
+  preprocessing:
+    # CT предобработка
+    ct:
+      clip_range: [-1000, 1000]  # Hounsfield units
+      target_spacing: [1.5, 1.5, 3.0]  # mm
+      target_size: [128, 128, 128]  # voxels
+      normalize: true
+    
+    # Аугментации
+    augmentation:
+      train:
+        horizontal_flip: 0.5
+        vertical_flip: 0.5
+        rotation: 30
+        brightness_contrast: 0.2
+        noise: 0.3
+        elastic: 0.3
+      
+      val:
+        # Без аугментаций для валидации
+        horizontal_flip: 0.0
+        vertical_flip: 0.0
+        rotation: 0
+        brightness_contrast: 0.0
+        noise: 0.0
+        elastic: 0.0
+
+# Конфигурация модели
+model:
+  # Архитектура
+  input_channels: 1
+  num_classes: 3  # фон, почка, опухоль
+  base_channels: 64
+  feature_dim: 512
+  coordinate_dim: 9  # 3 точки * 3 координаты
+  dropout: 0.1
+  
+  # Transfer learning
+  transfer_learning:
+    enabled: false
+    pretrained_path: ""
+    freeze_encoder: false
+    freeze_decoder: true
+
+# Конфигурация обучения
+training:
+  # Базовые параметры
+  epochs: 100
+  batch_size: 2
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  
+  # Оптимизатор
+  optimizer: "adam"  # adam, sgd
+  
+  # Функции потерь
+  segmentation_weight: 1.0
+  coordinate_weight: 1.0
+  dice_weight: 0.5
+  ce_weight: 0.5
+  
+  # Scheduler
+  scheduler:
+    enabled: true
+    type: "cosine"  # cosine, step
+    step_size: 30
+    gamma: 0.1
+  
+  # Early stopping
+  early_stopping_patience: 20
+  
+  # Checkpoints
+  save_every: 10  # эпох
+  keep_last: 5  # последних чекпоинтов
+
+# Конфигурация валидации
+validation:
+  metrics:
+    # Метрики сегментации
+    segmentation:
+      dice: true
+      iou: true
+      pixel_accuracy: true
+      sensitivity: true
+      specificity: true
+    
+    # Метрики координат
+    coordinates:
+      mae: true
+      mse: true
+      euclidean_distance: true
+      point_errors: true  # для каждой точки
+  
+  # Визуализация
+  visualization:
+    enabled: true
+    save_predictions: true
+    save_overlays: true
+    num_samples: 5
+
+# Конфигурация логирования
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  save_to_file: true
+  log_dir: "logs"
+  
+  # TensorBoard
+  tensorboard:
+    enabled: true
+    log_dir: "runs"
+    log_every: 10  # шагов
+
+# Конфигурация устройства
+device:
+  # GPU настройки
+  gpu:
+    enabled: true
+    device_ids: [0]  # CUDA device IDs
+    mixed_precision: true
+  
+  # CPU настройки
+  cpu:
+    num_workers: 4
+    pin_memory: true
+
+# Пути для сохранения
+paths:
+  models_dir: "models"
+  results_dir: "results"
+  checkpoints_dir: "checkpoints"
+  configs_dir: "configs"
+  
+# Эксперименты
+experiment:
+  name: "unified_kidney_ml"
+  version: "2.0"
+  description: "Унифицированная модель для сегментации и предсказания координат"
+  tags: ["kidney", "segmentation", "coordinate_prediction", "multi_task"]
+  
+  # Гиперпараметры для экспериментов
+  hyperparameters:
+    learning_rates: [0.0001, 0.00001, 0.000001]
+    batch_sizes: [1, 2, 4]
+    dropout_rates: [0.1, 0.2, 0.3]
+  
+  # Кросс-валидация
+  cross_validation:
+    enabled: false
+    folds: 5
+    stratify: true

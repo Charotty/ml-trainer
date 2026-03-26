@@ -1,0 +1,31 @@
+{
+  "scan_date": "2026-03-10T19:48:23.285858",
+  "data_directory": "D:\\DICOM СНИМКИ\\1. Октябрь 2023 (2)\\Баклан 12.10.2023\\Диком\\23092615",
+  "files_analyzed": [],
+  "summary": {
+    "total_analyzed": 0,
+    "tabular_files": {
+      "ready": 0,
+      "needs_cleaning": 0,
+      "not_suitable": 0,
+      "errors": 0
+    },
+    "dicom_studies": {
+      "ready": 0,
+      "insufficient": 0,
+      "errors": 0
+    },
+    "directories": {
+      "analyzed": 0
+    },
+    "generic_files": {
+      "analyzed": 0
+    },
+    "file_types_summary": {},
+    "total_size_mb": 0,
+    "overall_status": "poor"
+  },
+  "recommendations": [
+    "❌ Недостаточно данных для ML. Требуется больше исследований"
+  ]
+}

@@ -1,0 +1,2 @@
+case_id,full_name,study_date,sex,age,weight_kg,height_m,patient_position,slice_thickness,status,error,bmi,body_type
+Кириллов,Кириллов,2023-09-15,1.0,37.0,70.0,1.7,FFS,1.0,extracted,,24.221453287197235,0
