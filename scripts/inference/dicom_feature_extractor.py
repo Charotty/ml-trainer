@@ -1,9 +1,36 @@
 #!/usr/bin/env python3
+"""
+[LEGACY] DICOM feature extractor — prefer enhanced_ct_extractor.py.
+
+This module does not add unified body/spine slice aggregation present in
+``enhanced_ct_extractor``. Both now normalize output via phase1_schema, but
+new work should use::
+
+    python scripts/inference/enhanced_ct_extractor.py <dicom_root> --output out.csv
+"""
 
 import argparse
 import re
+import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+warnings.warn(
+    "dicom_feature_extractor.py is legacy; use enhanced_ct_extractor.py. "
+    "See: python scripts/run_phase1_pipeline.py info",
+    DeprecationWarning,
+    stacklevel=1,
+)
+
+try:
+    from src.features.phase1_schema import normalize_record
+except ImportError:
+    normalize_record = None  # type: ignore[assignment,misc]
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
@@ -389,29 +416,27 @@ def _extract_kidney_coordinates_from_segmentation(segmentation_path: Path) -> Di
             z_lower = np.min(z_coords)
             z_middle = (z_upper + z_lower) // 2
             
-            # Координаты для верхней точки
+            # Координаты для верхней точки — детерминированный медианный индекс
             upper_mask = kidney_right_mask & (seg_data == 8)
             upper_coords = np.where(upper_mask & (coords[0] == z_upper))
             if len(upper_coords[0]) > 0:
-                idx = np.random.randint(len(upper_coords[0]))  # случайная точка из верхних
+                idx = len(upper_coords[0]) // 2
                 result['kidney_right_upper_x'] = float(upper_coords[2][idx])
                 result['kidney_right_upper_y'] = float(upper_coords[1][idx])
                 result['kidney_right_upper_z'] = float(upper_coords[0][idx])
-            
-            # Координаты для средней точки
+
             middle_mask = kidney_right_mask & (seg_data == 8)
             middle_coords = np.where(middle_mask & (np.abs(coords[0] - z_middle) <= 2))
             if len(middle_coords[0]) > 0:
-                idx = np.random.randint(len(middle_coords[0]))
+                idx = len(middle_coords[0]) // 2
                 result['kidney_right_middle_x'] = float(middle_coords[2][idx])
                 result['kidney_right_middle_y'] = float(middle_coords[1][idx])
                 result['kidney_right_middle_z'] = float(middle_coords[0][idx])
-            
-            # Координаты для нижней точки
+
             lower_mask = kidney_right_mask & (seg_data == 8)
             lower_coords = np.where(lower_mask & (coords[0] == z_lower))
             if len(lower_coords[0]) > 0:
-                idx = np.random.randint(len(lower_coords[0]))
+                idx = len(lower_coords[0]) // 2
                 result['kidney_right_lower_x'] = float(lower_coords[2][idx])
                 result['kidney_right_lower_y'] = float(lower_coords[1][idx])
                 result['kidney_right_lower_z'] = float(lower_coords[0][idx])
@@ -434,29 +459,26 @@ def _extract_kidney_coordinates_from_segmentation(segmentation_path: Path) -> Di
             z_lower = np.min(z_coords)
             z_middle = (z_upper + z_lower) // 2
             
-            # Координаты для верхней точки
             upper_mask = kidney_left_mask & (seg_data == 9)
             upper_coords = np.where(upper_mask & (coords[0] == z_upper))
             if len(upper_coords[0]) > 0:
-                idx = np.random.randint(len(upper_coords[0]))
+                idx = len(upper_coords[0]) // 2
                 result['kidney_left_upper_x'] = float(upper_coords[2][idx])
                 result['kidney_left_upper_y'] = float(upper_coords[1][idx])
                 result['kidney_left_upper_z'] = float(upper_coords[0][idx])
-            
-            # Координаты для средней точки
+
             middle_mask = kidney_left_mask & (seg_data == 9)
             middle_coords = np.where(middle_mask & (np.abs(coords[0] - z_middle) <= 2))
             if len(middle_coords[0]) > 0:
-                idx = np.random.randint(len(middle_coords[0]))
+                idx = len(middle_coords[0]) // 2
                 result['kidney_left_middle_x'] = float(middle_coords[2][idx])
                 result['kidney_left_middle_y'] = float(middle_coords[1][idx])
                 result['kidney_left_middle_z'] = float(middle_coords[0][idx])
-            
-            # Координаты для нижней точки
+
             lower_mask = kidney_left_mask & (seg_data == 9)
             lower_coords = np.where(lower_mask & (coords[0] == z_lower))
             if len(lower_coords[0]) > 0:
-                idx = np.random.randint(len(lower_coords[0]))
+                idx = len(lower_coords[0]) // 2
                 result['kidney_left_lower_x'] = float(lower_coords[2][idx])
                 result['kidney_left_lower_y'] = float(lower_coords[1][idx])
                 result['kidney_left_lower_z'] = float(lower_coords[0][idx])
@@ -990,6 +1012,8 @@ def extract_features_from_dicom_folder(
         'slice_thickness_mm': float(thickness_mm),
     }
 
+    if normalize_record is not None:
+        return normalize_record(features)
     return features
 
 

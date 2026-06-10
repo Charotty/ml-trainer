@@ -1,20 +1,17 @@
 
 # Feature Configuration for Kidney Displacement Prediction
+# Canonical schema: config/phase1_feature_schema.yaml
+
+schema_version: phase1_v1
 
 features:
-  required:
+  required:  # BASE_FEATURES — raw inputs before engineering
     - kidney_left_center_x_rel
     - kidney_left_center_y_rel
     - kidney_left_center_z_rel
-    - kidney_left_center_x_norm
-    - kidney_left_center_y_norm
-    - kidney_left_center_z_norm
     - kidney_right_center_x_rel
     - kidney_right_center_y_rel
     - kidney_right_center_z_rel
-    - kidney_right_center_x_norm
-    - kidney_right_center_y_norm
-    - kidney_right_center_z_norm
     - kidney_left_length_mm
     - kidney_left_volume_cm3
     - kidney_right_length_mm
@@ -32,7 +29,6 @@ features:
     - body_com_x
     - body_com_y
     - body_com_z
-    - patient_position_encoded
 
   targets:
     - kidney_left_delta_x
@@ -45,4 +41,4 @@ features:
   preprocessing:
     imputation_strategy: "median"
     scaling_method: "standard"
-    handle_missing: "drop"
+    handle_missing: "impute_after_split"

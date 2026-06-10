@@ -1,3 +1,18 @@
+"""
+[LEGACY] FeatureSchema_v1 (36 features) — used by AR/unpaired branch only.
+
+Phase 1 displacement model uses src/features/phase1_schema.py instead.
+"""
+
+import warnings
+
+warnings.warn(
+    "unified_pipeline.FeatureSchema_v1 is not the Phase 1 production schema. "
+    "Use src/features/phase1_schema.py for kidney displacement training/inference.",
+    DeprecationWarning,
+    stacklevel=1,
+)
+
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Optional

@@ -6,6 +6,7 @@ Phase 2: Different ensemble combinations for different displacement axes
 
 import pandas as pd
 import numpy as np
+from sklearn.base import clone
 from sklearn.ensemble import VotingRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Lasso, Ridge
@@ -14,8 +15,20 @@ from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
+import sys
 import warnings
+from pathlib import Path
+
+warnings.warn(
+    "target_specific_ensemble.py is legacy; use adaptive_ensemble.py. "
+    "See: python scripts/run_phase1_pipeline.py info",
+    DeprecationWarning,
+    stacklevel=1,
+)
 warnings.filterwarnings('ignore')
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.features.phase1_schema import BASE_FEATURES, TARGET_NAMES, normalize_dataframe
 
 class TargetSpecificEnsembleTrainer:
     def __init__(self):
@@ -25,25 +38,8 @@ class TargetSpecificEnsembleTrainer:
         self.target_names = []
         self.results = {}
         
-        self.required_features = [
-            'kidney_left_center_x_rel', 'kidney_left_center_y_rel', 'kidney_left_center_z_rel',
-            'kidney_left_center_x_norm', 'kidney_left_center_y_norm', 'kidney_left_center_z_norm',
-            'kidney_right_center_x_rel', 'kidney_right_center_y_rel', 'kidney_right_center_z_rel',
-            'kidney_right_center_x_norm', 'kidney_right_center_y_norm', 'kidney_right_center_z_norm',
-            'kidney_left_length_mm', 'kidney_left_volume_cm3',
-            'kidney_right_length_mm', 'kidney_right_volume_cm3',
-            'body_width_mm', 'body_depth_mm', 'body_area_mm2',
-            'kidney_left_to_spine_distance', 'kidney_right_to_spine_distance',
-            'kidney_left_to_body_center_distance', 'kidney_right_to_body_center_distance',
-            'spine_center_x', 'spine_center_y', 'spine_center_z',
-            'body_com_x', 'body_com_y', 'body_com_z',
-            'patient_position_encoded',
-        ]
-
-        self.target_columns = [
-            'kidney_left_delta_x', 'kidney_left_delta_y', 'kidney_left_delta_z',
-            'kidney_right_delta_x', 'kidney_right_delta_y', 'kidney_right_delta_z'
-        ]
+        self.required_features = list(BASE_FEATURES)
+        self.target_columns = list(TARGET_NAMES)
         
         # Target-specific ensemble configurations
         # Based on analysis: large displacement axes need different models than small displacement axes
@@ -151,29 +147,16 @@ class TargetSpecificEnsembleTrainer:
     
     def process_dataset(self, df, dataset_name):
         """Process dataset to extract features and targets"""
-        available_features = [col for col in self.required_features if col in df.columns and col != 'patient_position_encoded']
+        df = normalize_dataframe(df)
         available_targets = [col for col in self.target_columns if col in df.columns]
-        
+
         if len(available_targets) == 0:
             print(f"No target variables found in {dataset_name} dataset")
             return None
-        
-        cols = ['case_id'] + available_features + available_targets
+
+        id_cols = [c for c in ('case_id',) if c in df.columns]
+        cols = id_cols + list(self.required_features) + available_targets
         processed_df = df[cols].copy()
-
-        # Patient position encoding: 0=supine, 1=other
-        position_col = 'patient_position' if 'patient_position' in df.columns else 'scan_position'
-        if position_col in df.columns:
-            pos = df[position_col].fillna('supine').astype(str).str.lower()
-            processed_df['patient_position_encoded'] = (~pos.str.contains('sup')).astype(int)
-        else:
-            processed_df['patient_position_encoded'] = 0
-
-        # Add missing feature columns so concat schema is consistent; impute later
-        for c in self.required_features:
-            if c not in processed_df.columns:
-                processed_df[c] = np.nan
-
         processed_df = processed_df.dropna(subset=available_targets)
 
         print(f"{dataset_name}: {len(processed_df)} cases")
@@ -250,36 +233,49 @@ class TargetSpecificEnsembleTrainer:
         return models
     
     def create_target_specific_ensemble(self, models, target_name):
-        """Create target-specific ensemble for specific target"""
+        """Create target-specific ensemble for specific target.
+
+        Each estimator is cloned to make sure training for one target
+        cannot leak fitted state into the ensemble used for another target.
+        """
         config = self.target_specific_configs[target_name]
         model_names = config['models']
         weights = config['weights']
-        
-        # Create estimators
+
         estimators = []
         for model_name in model_names:
             if model_name in models:
-                estimators.append((model_name, models[model_name]))
-        
+                estimators.append((model_name, clone(models[model_name])))
+
         return VotingRegressor(
             estimators=estimators,
             weights=weights,
-            n_jobs=-1
+            n_jobs=-1,
         )
-    
+
     def create_best_single_model(self, models, target_name):
-        """Create the best single model for comparison"""
+        """Return a fresh (unfitted) clone of the best single model.
+
+        Returning the raw instance from ``models`` would let ``.fit`` on this
+        target mutate the same object that is also referenced by the next
+        target's ensemble — clone() prevents that.
+        """
         best_model_name = self.best_single_models[target_name]
-        return models[best_model_name]
-    
+        return clone(models[best_model_name])
+
     def evaluate_model_cv(self, model, X_train, y_train, model_name):
-        """Evaluate model using cross-validation"""
-        cv_scores = cross_val_score(model, X_train, y_train, cv=5, 
-                                  scoring='neg_mean_absolute_error')
+        """Evaluate model using cross-validation on a cloned estimator."""
+        cv_scores = cross_val_score(
+            clone(model),
+            X_train,
+            y_train,
+            cv=5,
+            scoring='neg_mean_absolute_error',
+        )
         cv_mae = -cv_scores.mean()
         cv_std = cv_scores.std()
-        
-        print(f"  {model_name} CV MAE: {cv_mae:.3f} ± {cv_std:.3f}")
+
+        print(f"  {model_name} CV MAE: {cv_mae:.3f} +/- {cv_std:.3f}")
         return cv_mae, cv_std
     
     def train_and_evaluate_target_specific_ensembles(self, X_train, X_test, y_train, y_test):

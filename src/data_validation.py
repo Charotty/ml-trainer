@@ -325,16 +325,20 @@ class DataValidator:
             for i, target in enumerate(target_names):
                 if 'delta' in target.lower():
                     target_values = y[:, i]
-                    out_of_range = np.abs(target_values[target_values > delta_ranges['delta_range'][1]]) + \
-                                  np.abs(target_values[target_values < delta_ranges['delta_range'][0]])
-                    
-                    if len(out_of_range) > 0:
+                    low, high = delta_ranges['delta_range']
+                    out_of_range_mask = (target_values < low) | (target_values > high)
+                    out_of_range_count = int(np.sum(out_of_range_mask))
+
+                    if out_of_range_count > 0:
                         results.append(ValidationResult(
                             level=ValidationLevel.WARNING,
-                            message=f"Смещение {target} вне диапазона {delta_ranges['delta_range']}: {len(out_of_range)} значений",
+                            message=(
+                                f"Смещение {target} вне диапазона {delta_ranges['delta_range']}: "
+                                f"{out_of_range_count} значений"
+                            ),
                             feature_name=target,
-                            value=out_of_range.tolist(),
-                            expected_range=delta_ranges['delta_range']
+                            value=target_values[out_of_range_mask].tolist(),
+                            expected_range=delta_ranges['delta_range'],
                         ))
         
         # Проверка мультиколлинеарности

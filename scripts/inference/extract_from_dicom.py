@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """
+[LEGACY] DICOM extractor with non-canonical column names (X_upper_left, ...).
+
+Prefer: python scripts/inference/enhanced_ct_extractor.py
+
 Скрипт для извлечения данных из DICOM снимков.
 
 Извлекает:
@@ -12,7 +16,9 @@
     
     # Обработка нескольких папок
     python extract_from_dicom.py /path/to/folder1 /path/to/folder2
-    
+
+Canonical alternative: python scripts/run_phase1_pipeline.py extract --dicom-root ...
+
     # Обработка конкретного DICOM файла
     python extract_from_dicom.py /path/to/file.dcm
     
@@ -31,6 +37,13 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 import warnings
+
+warnings.warn(
+    "extract_from_dicom.py is legacy (non-canonical column names). "
+    "Use enhanced_ct_extractor.py — see: python scripts/run_phase1_pipeline.py info",
+    DeprecationWarning,
+    stacklevel=1,
+)
 warnings.filterwarnings('ignore')
 
 try:

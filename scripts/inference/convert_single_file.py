@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
 """
-КОНВЕРТАЦИЯ ОДНОГО ФАЙЛА В CSV
-Правильная обработка файла Выборка - 50.xlsx
+[LEGACY] Excel → CSV converter (supine/lateral Y/Z coordinates).
+
+Does NOT produce Phase 1 canonical features (kidney_left_center_*_rel).
+For production training use::
+
+    python scripts/run_phase1_pipeline.py integrate
 """
+import warnings
+
+warnings.warn(
+    "convert_single_file.py is legacy Excel pipeline. "
+    "Use data/vybor_unified_features.csv + run_phase1_pipeline.py. "
+    "See: python scripts/run_phase1_pipeline.py info",
+    DeprecationWarning,
+    stacklevel=1,
+)
 
 import pandas as pd
 import numpy as np
@@ -180,28 +193,49 @@ class SingleFileConverter:
         return df, feature_cols
     
     def clean_final_data(self, df, feature_cols, target_cols):
-        """Финальная очистка данных"""
+        """Финальная очистка данных (без импутации признаков).
+
+        Импутация переехала в ``impute_features_after_split`` — медиана
+        теперь обучается ТОЛЬКО на train-сплите, чтобы избежать утечки
+        статистики validation/test в train.
+        """
         logger.info("Финальная очистка данных...")
-        
-        # Собираем все нужные колонки
+
         all_cols = feature_cols + target_cols + ['ФИО']
         df_clean = df[all_cols].copy()
-        
-        # Удаляем строки где нет целевых переменных
+
         initial_count = len(df_clean)
         df_clean = df_clean.dropna(subset=target_cols, how='any')
         final_count = len(df_clean)
-        
+
         logger.info(f"Удалено строк без целевых переменных: {initial_count - final_count}")
-        
-        # Заполняем пропуски в признаках медианой
-        for col in feature_cols:
-            if df_clean[col].isna().any():
-                median_val = df_clean[col].median()
-                df_clean[col] = df_clean[col].fillna(median_val)
-                logger.info(f"  Заполнено пропусков в {col}: {df_clean[col].isna().sum()}")
-        
         return df_clean
+
+    def impute_features_after_split(self, train_df, val_df, test_df, feature_cols):
+        """Заполняет NaN в признаках медианой, обученной ТОЛЬКО на train.
+
+        Это устраняет утечку статистики validation/test в train (раньше
+        медиана считалась по объединённому датасету до сплита).
+        """
+        logger.info("Импутация признаков (median, fit на train)...")
+        medians = train_df[feature_cols].median()
+        train_imputed = train_df.copy()
+        val_imputed = val_df.copy()
+        test_imputed = test_df.copy()
+
+        for col in feature_cols:
+            median_val = medians[col]
+            for part_name, part_df in (
+                ("train", train_imputed),
+                ("val", val_imputed),
+                ("test", test_imputed),
+            ):
+                missing = int(part_df[col].isna().sum())
+                if missing:
+                    part_df[col] = part_df[col].fillna(median_val)
+                    logger.info(f"  {part_name}.{col}: filled {missing} NaN with train_median={median_val:.4f}")
+
+        return train_imputed, val_imputed, test_imputed
     
     def split_data(self, df):
         """Разделить данные на train/validation/test"""
@@ -282,12 +316,18 @@ class SingleFileConverter:
             target_cols = ['Y_upper_lateral', 'Z_upper_lateral']
             target_cols = [col for col in target_cols if col in df.columns]
             
-            # 7. Финальная очистка
+            # 7. Финальная очистка (без импутации)
             df_clean = self.clean_final_data(df, feature_cols, target_cols)
-            
+
             # 8. Разделение данных
             train_df, val_df, test_df = self.split_data(df_clean)
-            
+
+            # 8a. Импутация ПОСЛЕ split: fit медианы только на train,
+            # применить к val/test — иначе утечка статистики.
+            train_df, val_df, test_df = self.impute_features_after_split(
+                train_df, val_df, test_df, feature_cols
+            )
+
             # 9. Сохранение
             metadata = self.save_data(train_df, val_df, test_df, feature_cols, target_cols)
             

@@ -1,8 +1,36 @@
 #!/usr/bin/env python3
 """
-REST API for Kidney Displacement Predictor
-Production-ready API endpoint for clinical use
+[DEPRECATED] Flask REST API for Kidney Displacement Predictor.
+
+Canonical predict-API for this project is the FastAPI service in
+``src/api/kidney_displacement_api.py``. Reasons:
+
+  * Production stack standardised on FastAPI + Pydantic + Uvicorn.
+  * FastAPI service is the one that ships the corrected feature
+    pipeline (imputer + scaler) wired by the audit fixes 1.1, 1.2, 1.7.
+  * This Flask file exposes a different feature contract (30 fields
+    with ``_rel``/``_norm`` suffixes + ``patient_position_encoded``)
+    that no longer matches the trained ensemble.
+
+This module is kept ONLY for legacy clients. New integrations MUST use
+the FastAPI service. If you find yourself editing this file in 2026 or
+later, prefer porting the change to ``src/api/kidney_displacement_api.py``
+instead.
 """
+
+import sys
+from pathlib import Path
+import warnings
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.features.phase1_schema import BASE_FEATURES
+
+warnings.warn(
+    "models.phase1.api_kidney_predictor is deprecated; use the FastAPI "
+    "service at src/api/kidney_displacement_api.py instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -63,20 +91,7 @@ def validate_request_data(data):
         return False, errors
     
     # Check required features
-    required_features = [
-        'kidney_left_center_x_rel', 'kidney_left_center_y_rel', 'kidney_left_center_z_rel',
-        'kidney_left_center_x_norm', 'kidney_left_center_y_norm', 'kidney_left_center_z_norm',
-        'kidney_right_center_x_rel', 'kidney_right_center_y_rel', 'kidney_right_center_z_rel',
-        'kidney_right_center_x_norm', 'kidney_right_center_y_norm', 'kidney_right_center_z_norm',
-        'kidney_left_length_mm', 'kidney_left_volume_cm3',
-        'kidney_right_length_mm', 'kidney_right_volume_cm3',
-        'body_width_mm', 'body_depth_mm', 'body_area_mm2',
-        'kidney_left_to_spine_distance', 'kidney_right_to_spine_distance',
-        'kidney_left_to_body_center_distance', 'kidney_right_to_body_center_distance',
-        'spine_center_x', 'spine_center_y', 'spine_center_z',
-        'body_com_x', 'body_com_y', 'body_com_z',
-        'patient_position_encoded'
-    ]
+    required_features = list(BASE_FEATURES)
     
     missing_features = set(required_features) - set(data.keys())
     if missing_features:

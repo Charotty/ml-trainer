@@ -37,6 +37,7 @@ class KidneyARSystem:
         self.fallback_handler = None
         self.temporal_smoother = None
         self.coordinate_transformer = MultiLevelTransformer()
+        self.model_ready = False
         
         # Загрузка компонентов
         self._load_components(model_path, pipeline_path)
@@ -52,6 +53,7 @@ class KidneyARSystem:
                 model_data = joblib.load(model_path)
                 self.models = model_data['models']
                 self.train_data = model_data['train_data']
+                self.model_ready = bool(self.models)
                 logger.info(f"Загружено {len(self.models)} ML моделей")
             
             # Загрузка pipeline
@@ -101,6 +103,12 @@ class KidneyARSystem:
         logger.info("Начало предсказания смещения почек")
         
         try:
+            if not self.model_ready:
+                return self._create_error_response([
+                    "ML models are not loaded. AR displacement prediction is disabled in fail-safe mode.",
+                    "Provide a valid trained model_path when initializing KidneyARSystem.",
+                ])
+
             # 1. Валидация входных данных
             validation_result = self._validate_input_data(patient_data)
             if not validation_result['is_valid']:
@@ -242,8 +250,9 @@ class KidneyARSystem:
     def _predict_displacement(self, features: np.ndarray) -> np.ndarray:
         """ML предсказание смещения"""
         if not self.models:
-            # Простейшее предсказание если модели не загружены
-            return np.array([5.0, -3.0, 2.0, 5.0, -3.0, 2.0])
+            raise RuntimeError(
+                "ML models are not loaded; synthetic displacement fallback is disabled."
+            )
         
         # Ансамбль предсказаний
         predictions = []
@@ -261,7 +270,7 @@ class KidneyARSystem:
         if self.confidence_estimator:
             return self.confidence_estimator.calculate_confidence(features)
         else:
-            return 0.7  # значение по умолчанию
+            return 0.0
     
     def _apply_constraints_and_fallback(self, features: np.ndarray, prediction: np.ndarray, 
                                       confidence: float, patient_data: Dict) -> np.ndarray:
@@ -287,8 +296,9 @@ class KidneyARSystem:
             # Предсказание для одной почки, дублируем для обеих
             final_prediction = np.concatenate([prediction, prediction])
         else:
-            # Некорректная размерность, используем значения по умолчанию
-            final_prediction = np.array([5.0, -3.0, 2.0, 5.0, -3.0, 2.0])
+            raise ValueError(
+                f"Invalid prediction shape: expected 3 or 6 values, got {len(prediction)}."
+            )
         
         # Применение fallback handler
         if self.fallback_handler:

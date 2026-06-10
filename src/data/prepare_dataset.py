@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """
+[LEGACY] Excel-centric dataset preparator with custom feature columns.
+
+Canonical integration: src/models/data_integration_fix.py
+CLI: python scripts/run_phase1_pipeline.py integrate
+
 Скрипт подготовки данных для ML модели предсказания смещения почек.
 
 Выполняет:
@@ -13,6 +18,15 @@
 Автор: AR Kidney ML Project
 Версия: 1.0
 """
+
+import warnings
+
+warnings.warn(
+    "prepare_dataset.py is legacy Excel pipeline. "
+    "Use data_integration_fix.py — see: python scripts/run_phase1_pipeline.py info",
+    DeprecationWarning,
+    stacklevel=1,
+)
 
 import pandas as pd
 import numpy as np

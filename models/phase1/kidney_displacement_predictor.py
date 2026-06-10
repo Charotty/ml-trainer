@@ -12,8 +12,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 from dataclasses import dataclass
+import sys
 import warnings
 warnings.filterwarnings('ignore')
+
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+from src.features.phase1_schema import BASE_FEATURES, TARGET_NAMES
 
 # Import our best ensemble
 from adaptive_ensemble import AdaptiveEnsembleTrainer
@@ -58,26 +62,9 @@ class KidneyDisplacementPredictor:
         self.is_trained = False
         self.metadata = None
         
-        # Feature and target information
-        self.required_features = [
-            'kidney_left_center_x_rel', 'kidney_left_center_y_rel', 'kidney_left_center_z_rel',
-            'kidney_left_center_x_norm', 'kidney_left_center_y_norm', 'kidney_left_center_z_norm',
-            'kidney_right_center_x_rel', 'kidney_right_center_y_rel', 'kidney_right_center_z_rel',
-            'kidney_right_center_x_norm', 'kidney_right_center_y_norm', 'kidney_right_center_z_norm',
-            'kidney_left_length_mm', 'kidney_left_volume_cm3',
-            'kidney_right_length_mm', 'kidney_right_volume_cm3',
-            'body_width_mm', 'body_depth_mm', 'body_area_mm2',
-            'kidney_left_to_spine_distance', 'kidney_right_to_spine_distance',
-            'kidney_left_to_body_center_distance', 'kidney_right_to_body_center_distance',
-            'spine_center_x', 'spine_center_y', 'spine_center_z',
-            'body_com_x', 'body_com_y', 'body_com_z',
-            'patient_position_encoded',
-        ]
-        
-        self.target_columns = [
-            'kidney_left_delta_x', 'kidney_left_delta_y', 'kidney_left_delta_z',
-            'kidney_right_delta_x', 'kidney_right_delta_y', 'kidney_right_delta_z'
-        ]
+        # Canonical base inputs (engineered/cross computed by ensemble trainer).
+        self.required_features = list(BASE_FEATURES)
+        self.target_columns = list(TARGET_NAMES)
         
         # Performance benchmarks (from adaptive ensemble results)
         self.performance_benchmarks = {
@@ -90,58 +77,56 @@ class KidneyDisplacementPredictor:
         }
     
     def train(self, data_path: Optional[str] = None, save_model: bool = True) -> Dict[str, float]:
-        """
-        Train the adaptive ensemble model
-        
-        Args:
-            data_path: Path to training data (if None, uses default paths)
-            save_model: Whether to save the trained model
-            
-        Returns:
-            Training performance metrics
+        """Train the adaptive ensemble model on integrated train/val files.
+
+        Uses ``AdaptiveEnsembleTrainer.load_integrated_data`` +
+        ``prepare_training_data_split`` so train/val statistics never leak.
+        ``data_path`` is accepted for API stability but currently unused —
+        the trainer reads ``data/processed/{train,validation}.csv``.
         """
         print("="*60)
         print("TRAINING KIDNEY DISPLACEMENT PREDICTOR")
         print("="*60)
-        
-        # Initialize ensemble trainer
+
         self.ensemble_trainer = AdaptiveEnsembleTrainer()
-        
-        # Load and prepare data
+
         if data_path:
-            # Custom data loading logic can be added here
+            # Place-holder for future custom data loading; currently a no-op.
             pass
-        
-        df = self.ensemble_trainer.load_and_prepare_data()
-        if df is None:
-            raise ValueError("Failed to load training data")
-        
-        # Prepare training data
-        X_train, X_test, y_train, y_test = self.ensemble_trainer.prepare_training_data(df)
-        
-        # Train adaptive ensemble
-        results = self.ensemble_trainer.train_and_evaluate_adaptive_ensembles(
-            X_train, X_test, y_train, y_test
+
+        combined_df, train_df, val_df = self.ensemble_trainer.load_integrated_data()
+        if train_df is None or val_df is None:
+            raise ValueError(
+                "Failed to load integrated training data. "
+                "Expected data/processed/train.csv and validation.csv."
+            )
+
+        X_train, X_test, y_train, y_test = self.ensemble_trainer.prepare_training_data_split(
+            train_df, val_df,
         )
-        
-        # Generate and save report
+        if X_train is None:
+            raise ValueError("Failed to prepare training data after split.")
+
+        results = self.ensemble_trainer.train_and_evaluate_adaptive_ensembles(
+            X_train, X_test, y_train, y_test,
+        )
+
         self.ensemble_trainer.generate_report()
-        
-        # Create metadata
+
         self.metadata = ModelMetadata(
             model_name="KidneyDisplacementPredictor",
             version="1.0.0",
             training_date=datetime.now().isoformat(),
             dataset_info={
-                "total_cases": len(df),
+                "total_cases": len(train_df) + len(val_df),
                 "training_cases": len(X_train),
                 "test_cases": len(X_test),
-                "features": len(self.required_features),
-                "targets": len(self.target_columns)
+                "features": len(self.ensemble_trainer.feature_names),
+                "targets": len(self.target_columns),
             },
             performance_metrics=self._calculate_training_metrics(results),
-            feature_names=self.required_features,
-            target_names=self.target_columns
+            feature_names=list(self.ensemble_trainer.feature_names),
+            target_names=self.target_columns,
         )
         
         # Save model if requested
@@ -157,77 +142,82 @@ class KidneyDisplacementPredictor:
         return self.metadata.performance_metrics
     
     def predict(self, patient_data: Union[pd.DataFrame, Dict, np.ndarray]) -> PredictionResult:
+        """Predict kidney displacement for one patient.
+
+        Pipeline: base + engineered + cross features -> imputer -> scaler
+        -> per-target trained ensemble model from
+        ``ensemble_trainer.trained_models``.
+
+        Raises:
+            ValueError: if model is not trained or trained_models dict is empty
+                (formerly produced a silent ``NotFittedError`` deep in sklearn).
         """
-        Predict kidney displacement for patient data
-        
-        Args:
-            patient_data: Patient features (DataFrame, dict, or numpy array)
-            
-        Returns:
-            PredictionResult with predictions, confidence intervals, and metadata
-        """
-        if not self.is_trained:
-            raise ValueError("Model not trained. Call train() first.")
-        
-        # Convert input to DataFrame
+        if not self.is_trained or self.ensemble_trainer is None:
+            raise ValueError("Model not trained. Call train() or load_model() first.")
+        trained_models = getattr(self.ensemble_trainer, "trained_models", None)
+        if not trained_models:
+            raise ValueError(
+                "ensemble_trainer.trained_models is empty. Call train() to fit "
+                "ensembles before predict()."
+            )
+
+        from src.features.pipeline import build_inference_matrix, apply_model_preprocessing
+        from src.features.phase1_schema import normalize_dataframe, validate_base_features
+
         if isinstance(patient_data, dict):
-            df = pd.DataFrame([patient_data])
+            df = normalize_dataframe(pd.DataFrame([patient_data]))
         elif isinstance(patient_data, np.ndarray):
-            df = pd.DataFrame(patient_data, columns=self.required_features)
+            df = normalize_dataframe(pd.DataFrame(patient_data, columns=self.required_features))
         else:
-            df = patient_data.copy()
-        
-        # Validate features
-        missing_features = set(self.required_features) - set(df.columns)
-        if missing_features:
-            raise ValueError(f"Missing required features: {missing_features}")
-        
-        # Prepare features
-        X = df[self.required_features].values
-        X_scaled = self.ensemble_trainer.scaler.transform(X)
-        
-        # Make predictions for each target
-        predictions = {}
-        confidence_intervals = {}
-        model_confidence = {}
-        
-        for i, target_name in enumerate(self.target_columns):
-            # Get adaptive ensemble for this target
-            adaptive_ensemble = self.ensemble_trainer.create_adaptive_voting_ensemble(
-                self.ensemble_trainer.load_base_models(), target_name
+            df = normalize_dataframe(patient_data.copy())
+
+        validation = validate_base_features(df, min_present_ratio=0.5)
+        if not validation.is_valid:
+            raise ValueError(
+                f"Insufficient base features after normalization: {validation.warnings}"
             )
-            
-            # Train ensemble (in production, this would be pre-trained)
-            # For now, we'll train on the fly (this should be optimized)
-            # TODO: Pre-train and load ensembles
-            
-            # Make prediction
-            pred = adaptive_ensemble.predict(X_scaled)[0]
-            predictions[target_name] = float(pred)
-            
-            # Calculate confidence interval (simplified)
-            confidence_interval = self._calculate_confidence_interval(
-                pred, target_name
-            )
-            confidence_intervals[target_name] = confidence_interval
-            
-            # Model confidence based on target difficulty
+
+        feature_names = self.ensemble_trainer.feature_names
+        X = build_inference_matrix(
+            self.ensemble_trainer, df, feature_names=feature_names,
+        )
+        model_data = {
+            "imputer": getattr(self.ensemble_trainer, "imputer", None),
+            "scaler": self.ensemble_trainer.scaler,
+            "models": trained_models,
+            "feature_names": feature_names,
+        }
+        X_scaled = apply_model_preprocessing(X, model_data)
+
+        predictions: Dict[str, float] = {}
+        confidence_intervals: Dict[str, Tuple[float, float]] = {}
+        model_confidence: Dict[str, float] = {}
+
+        for target_name in self.target_columns:
+            model = trained_models.get(target_name)
+            if model is None:
+                raise ValueError(
+                    f"No trained model for target '{target_name}'. Available: "
+                    f"{list(trained_models.keys())}"
+                )
+            pred = float(model.predict(X_scaled)[0])
+            predictions[target_name] = pred
+            confidence_intervals[target_name] = self._calculate_confidence_interval(pred, target_name)
             model_confidence[target_name] = self._get_model_confidence(target_name)
-        
-        # Create metadata
+
         prediction_metadata = {
             "model_version": self.metadata.version if self.metadata else "1.0.0",
             "prediction_time": datetime.now().isoformat(),
-            "input_features": len(self.required_features),
+            "input_features": len(self.ensemble_trainer.feature_names) if self.ensemble_trainer.feature_names else len(self.required_features),
             "model_type": "Adaptive_Ensemble",
-            "expected_performance": self.performance_benchmarks
+            "expected_performance": self.performance_benchmarks,
         }
-        
+
         return PredictionResult(
             predictions=predictions,
             confidence_intervals=confidence_intervals,
             model_confidence=model_confidence,
-            prediction_metadata=prediction_metadata
+            prediction_metadata=prediction_metadata,
         )
     
     def predict_batch(self, patient_batch: Union[pd.DataFrame, List[Dict]]) -> List[PredictionResult]:
@@ -339,31 +329,37 @@ class KidneyDisplacementPredictor:
         return str(save_dir)
     
     def load_model(self, model_dir: str) -> None:
-        """
-        Load trained model from disk
-        
-        Args:
-            model_dir: Directory containing saved model
+        """Load trained model from disk.
+
+        ``is_trained`` is only set to True if the loaded
+        ``ensemble_trainer.trained_models`` is non-empty — otherwise predict()
+        would still fail at runtime.
         """
         load_dir = Path(model_dir)
-        
-        # Load ensemble trainer
+
         model_file = load_dir / "kidney_displacement_model.pkl"
         if not model_file.exists():
             raise FileNotFoundError(f"Model file not found: {model_file}")
-        
+
         with open(model_file, 'rb') as f:
             self.ensemble_trainer = pickle.load(f)
-        
-        # Load metadata
+
         metadata_file = load_dir / "model_metadata.json"
         if metadata_file.exists():
             with open(metadata_file, 'r') as f:
                 metadata_dict = json.load(f)
                 self.metadata = ModelMetadata(**metadata_dict)
-        
-        self.is_trained = True
-        print(f"✅ Model loaded from {load_dir}")
+
+        trained_models = getattr(self.ensemble_trainer, "trained_models", None) or {}
+        if not trained_models:
+            print(
+                f"WARNING: loaded ensemble_trainer from {load_dir} has no fitted "
+                "trained_models. predict() will raise until train() is called."
+            )
+            self.is_trained = False
+        else:
+            self.is_trained = True
+        print(f"Model loaded from {load_dir}")
     
     def get_model_info(self) -> Dict:
         """Get model information and status"""

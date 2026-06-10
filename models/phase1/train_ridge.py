@@ -13,8 +13,20 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.feature_selection import SelectKBest, f_regression, RFE
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.impute import SimpleImputer
+import sys
 import warnings
+from pathlib import Path
+
+warnings.warn(
+    "train_ridge.py is legacy; use models/phase1/adaptive_ensemble.py. "
+    "See: python scripts/run_phase1_pipeline.py info",
+    DeprecationWarning,
+    stacklevel=1,
+)
 warnings.filterwarnings('ignore')
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.features.phase1_schema import BASE_FEATURES, TARGET_NAMES
 
 class RidgeTrainer:
     def __init__(self):
@@ -26,25 +38,8 @@ class RidgeTrainer:
         self.target_names = []
         self.results = {}
 
-        self.required_features = [
-            'kidney_left_center_x_rel', 'kidney_left_center_y_rel', 'kidney_left_center_z_rel',
-            'kidney_left_center_x_norm', 'kidney_left_center_y_norm', 'kidney_left_center_z_norm',
-            'kidney_right_center_x_rel', 'kidney_right_center_y_rel', 'kidney_right_center_z_rel',
-            'kidney_right_center_x_norm', 'kidney_right_center_y_norm', 'kidney_right_center_z_norm',
-            'kidney_left_length_mm', 'kidney_left_volume_cm3',
-            'kidney_right_length_mm', 'kidney_right_volume_cm3',
-            'body_width_mm', 'body_depth_mm', 'body_area_mm2',
-            'kidney_left_to_spine_distance', 'kidney_right_to_spine_distance',
-            'kidney_left_to_body_center_distance', 'kidney_right_to_body_center_distance',
-            'spine_center_x', 'spine_center_y', 'spine_center_z',
-            'body_com_x', 'body_com_y', 'body_com_z',
-            'patient_position_encoded',
-        ]
-
-        self.target_columns = [
-            'kidney_left_delta_x', 'kidney_left_delta_y', 'kidney_left_delta_z',
-            'kidney_right_delta_x', 'kidney_right_delta_y', 'kidney_right_delta_z'
-        ]
+        self.required_features = list(BASE_FEATURES)
+        self.target_columns = list(TARGET_NAMES)
         
     def load_and_prepare_data(self):
         """Load and prepare datasets for training"""
@@ -91,27 +86,18 @@ class RidgeTrainer:
     
     def process_dataset(self, df, dataset_name):
         """Process dataset to extract features and targets"""
-        available_features = [col for col in self.required_features if col in df.columns and col != 'patient_position_encoded']
+        from src.features.phase1_schema import normalize_dataframe
+
+        df = normalize_dataframe(df)
         available_targets = [col for col in self.target_columns if col in df.columns]
-        
+
         if len(available_targets) == 0:
             print(f"No target variables found in {dataset_name} dataset")
             return None
-        
-        cols = ['case_id'] + available_features + available_targets
+
+        id_cols = [c for c in ('case_id',) if c in df.columns]
+        cols = id_cols + list(self.required_features) + available_targets
         processed_df = df[cols].copy()
-
-        position_col = 'patient_position' if 'patient_position' in df.columns else 'scan_position'
-        if position_col in df.columns:
-            pos = df[position_col].fillna('supine').astype(str).str.lower()
-            processed_df['patient_position_encoded'] = (~pos.str.contains('sup')).astype(int)
-        else:
-            processed_df['patient_position_encoded'] = 0
-
-        for c in self.required_features:
-            if c not in processed_df.columns:
-                processed_df[c] = np.nan
-
         processed_df = processed_df.dropna(subset=available_targets)
         print(f"{dataset_name}: {len(processed_df)} cases")
         return processed_df
@@ -237,20 +223,14 @@ class RidgeTrainer:
         if use_tuning:
             models = self.hyperparameter_tuning(X_train, y_train)
         else:
-            # Use optimized default parameters
             models = {}
-            for target_name in self.target_names:
+            for i, target_name in enumerate(self.target_names):
                 y_train_target = y_train[:, i]
                 selected_features = self.feature_selection(X_train, y_train_target, self.feature_names)
-                X_train_selected = self.feature_selector.transform(X_train)
-                
                 models[target_name] = {
-                    'model': Ridge(
-                        alpha=1.0,
-                        random_state=42
-                    ),
+                    'model': Ridge(alpha=1.0, random_state=42),
                     'selected_features': selected_features,
-                    'feature_selector': self.feature_selector
+                    'feature_selector': self.feature_selector,
                 }
         
         results = {}
@@ -293,12 +273,28 @@ class RidgeTrainer:
             outliers = np.sum(np.abs(y_test_target - y_pred) > 20)
             std_error = np.std(y_test_target - y_pred)
             
-            # Cross-validation
-            cv_scores = cross_val_score(model, X_train, y_train_target, cv=5, 
-                                      scoring='neg_mean_absolute_error')
+            cv_scores = cross_val_score(
+                model,
+                X_train_selected,
+                y_train_target,
+                cv=5,
+                scoring='neg_mean_absolute_error',
+            )
             cv_mae = -cv_scores.mean()
             cv_std = cv_scores.std()
-            
+
+            if hasattr(model, 'coef_'):
+                coef = model.coef_
+                nonzero_coef = int(np.sum(coef != 0))
+                top_features = sorted(
+                    zip(selected_features, np.abs(coef)),
+                    key=lambda x: x[1],
+                    reverse=True,
+                )[:5]
+            else:
+                nonzero_coef = 0
+                top_features = []
+
             results[target_name] = {
                 'MAE': mae,
                 'RMSE': rmse,
@@ -316,38 +312,28 @@ class RidgeTrainer:
                 'Solver': model.solver,
                 'Selected_Features': len(selected_features),
                 'NonZero_Coefficients': nonzero_coef,
-                'Top_Features': top_features
+                'Top_Features': top_features,
             }
-            
+
             print(f"  Test MAE: {mae:.3f} mm")
             print(f"  Test RMSE: {rmse:.3f} mm")
-            print(f"  R²: {r2:.3f}")
+            print(f"  R2: {r2:.3f}")
             print(f"  Median AE: {median_ae:.3f} mm")
             print(f"  <5mm accuracy: {error_5mm:.1f}%")
             print(f"  <10mm accuracy: {error_10mm:.1f}%")
             print(f"  Max Error: {max_error:.3f} mm")
             print(f"  Outliers >20mm: {outliers}")
-            print(f"  CV MAE: {cv_mae:.3f} ± {cv_std:.3f}")
+            print(f"  CV MAE: {cv_mae:.3f} +/- {cv_std:.3f}")
             print(f"  Best Alpha: {model.alpha:.4f}")
             print(f"  Solver: {model.solver}")
             print(f"  Features selected: {len(selected_features)}")
             print(f"  Non-zero coefficients: {nonzero_coef}")
-            
+
             if top_features:
                 print(f"  Top 5 features:")
-                for feat, coef in top_features:
-                    print(f"    {feat}: {coef:.3f}")
-            
-            # Feature coefficients
-            if hasattr(model, 'coef_'):
-                coef = model.coef_
-                nonzero_coef = np.sum(coef != 0)
-                top_features = sorted(zip(selected_features, np.abs(coef)), 
-                                   key=lambda x: x[1], reverse=True)[:5]
-            else:
-                nonzero_coef = 0
-                top_features = []
-        
+                for feat, coef_val in top_features:
+                    print(f"    {feat}: {coef_val:.3f}")
+
         self.results = results
         return results
     

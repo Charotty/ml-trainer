@@ -1,3 +1,11 @@
+"""
+AR-navigation and clinical workflow API (sensors, validation, metrics).
+
+NOT the canonical kidney displacement prediction API. For ML predict
+endpoints use ``src/api/kidney_displacement_api.py`` (FastAPI, port 8000).
+This module serves a different contract (age/bmi/sex, AR matrices, etc.).
+"""
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field

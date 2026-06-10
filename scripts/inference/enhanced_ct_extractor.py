@@ -9,6 +9,7 @@
 
 import argparse
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Union
@@ -30,6 +31,30 @@ try:
     from totalsegmentator.python_api import totalsegmentator
 except Exception:
     totalsegmentator = None
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+try:
+    from src.features.phase1_schema import normalize_record
+except ImportError:
+    normalize_record = None  # type: ignore[assignment,misc]
+
+try:
+    from src.features.ct_geometry import (
+        aggregate_body_at_z_band,
+        dicom_centroid_to_patient_mm,
+        kidney_features_from_mask,
+        merge_spine_relative,
+        patient_kidney_side,
+    )
+except ImportError:
+    aggregate_body_at_z_band = None  # type: ignore[assignment,misc]
+    dicom_centroid_to_patient_mm = None  # type: ignore[assignment,misc]
+    kidney_features_from_mask = None  # type: ignore[assignment,misc]
+    merge_spine_relative = None  # type: ignore[assignment,misc]
+    patient_kidney_side = None  # type: ignore[assignment,misc]
 
 try:
     from skimage import measure, morphology
@@ -283,116 +308,26 @@ def _extract_study_date(ds) -> Optional[str]:
 
 
 def _extract_kidney_coordinates_from_segmentation(segmentation_path: Path) -> Dict[str, Optional[float]]:
-    """Извлекает координаты почек из маски сегментации TotalSegmentator"""
-    if nib is None:
+    """Kidney anatomy from TotalSegmentator mask in patient LPS mm (affine, not voxel indices)."""
+    if nib is None or kidney_features_from_mask is None:
         return {}
-    
+
     try:
-        # Загружаем маску сегментации
         seg_img = nib.load(str(segmentation_path))
         seg_data = seg_img.get_fdata()
-        
-        # ID сегментов для почек в TotalSegmentator
-        # Правая почка: 8, Левая почка: 9
-        kidney_right_mask = seg_data == 8
-        kidney_left_mask = seg_data == 9
-        
-        result = {}
-        
-        # Обрабатываем правую почку
-        if np.any(kidney_right_mask):
-            coords = np.where(kidney_right_mask)
-            z_coords = coords[0]
-            
-            # Находим верхнюю, среднюю и нижнюю точки
-            z_upper = np.max(z_coords)
-            z_lower = np.min(z_coords)
-            z_middle = (z_upper + z_lower) // 2
-            
-            # Координаты для верхней точки
-            upper_mask = kidney_right_mask & (seg_data == 8)
-            upper_coords = np.where(upper_mask & (coords[0] == z_upper))
-            if len(upper_coords[0]) > 0:
-                idx = np.random.randint(len(upper_coords[0]))
-                result['kidney_right_upper_x'] = float(upper_coords[2][idx])
-                result['kidney_right_upper_y'] = float(upper_coords[1][idx])
-                result['kidney_right_upper_z'] = float(upper_coords[0][idx])
-            
-            # Координаты для средней точки
-            middle_mask = kidney_right_mask & (seg_data == 8)
-            middle_coords = np.where(middle_mask & (np.abs(coords[0] - z_middle) <= 2))
-            if len(middle_coords[0]) > 0:
-                idx = np.random.randint(len(middle_coords[0]))
-                result['kidney_right_middle_x'] = float(middle_coords[2][idx])
-                result['kidney_right_middle_y'] = float(middle_coords[1][idx])
-                result['kidney_right_middle_z'] = float(middle_coords[0][idx])
-            
-            # Координаты для нижней точки
-            lower_mask = kidney_right_mask & (seg_data == 8)
-            lower_coords = np.where(lower_mask & (coords[0] == z_lower))
-            if len(lower_coords[0]) > 0:
-                idx = np.random.randint(len(lower_coords[0]))
-                result['kidney_right_lower_x'] = float(lower_coords[2][idx])
-                result['kidney_right_lower_y'] = float(lower_coords[1][idx])
-                result['kidney_right_lower_z'] = float(lower_coords[0][idx])
-            
-            # Объем почки в см³
-            voxel_volume = np.prod(seg_img.header.get_zooms())
-            kidney_volume_voxels = np.sum(kidney_right_mask)
-            result['kidney_right_volume_cm3'] = float(kidney_volume_voxels * voxel_volume / 1000.0)
-            
-            # Длина почки в мм
-            kidney_length_voxels = z_upper - z_lower + 1
-            result['kidney_right_length_mm'] = float(kidney_length_voxels * seg_img.header.get_zooms()[0])
-        
-        # Обрабатываем левую почку
-        if np.any(kidney_left_mask):
-            coords = np.where(kidney_left_mask)
-            z_coords = coords[0]
-            
-            # Находим верхнюю, среднюю и нижнюю точки
-            z_upper = np.max(z_coords)
-            z_lower = np.min(z_coords)
-            z_middle = (z_upper + z_lower) // 2
-            
-            # Координаты для верхней точки
-            upper_mask = kidney_left_mask & (seg_data == 9)
-            upper_coords = np.where(upper_mask & (coords[0] == z_upper))
-            if len(upper_coords[0]) > 0:
-                idx = np.random.randint(len(upper_coords[0]))
-                result['kidney_left_upper_x'] = float(upper_coords[2][idx])
-                result['kidney_left_upper_y'] = float(upper_coords[1][idx])
-                result['kidney_left_upper_z'] = float(upper_coords[0][idx])
-            
-            # Координаты для средней точки
-            middle_mask = kidney_left_mask & (seg_data == 9)
-            middle_coords = np.where(middle_mask & (np.abs(coords[0] - z_middle) <= 2))
-            if len(middle_coords[0]) > 0:
-                idx = np.random.randint(len(middle_coords[0]))
-                result['kidney_left_middle_x'] = float(middle_coords[2][idx])
-                result['kidney_left_middle_y'] = float(middle_coords[1][idx])
-                result['kidney_left_middle_z'] = float(middle_coords[0][idx])
-            
-            # Координаты для нижней точки
-            lower_mask = kidney_left_mask & (seg_data == 9)
-            lower_coords = np.where(lower_mask & (coords[0] == z_lower))
-            if len(lower_coords[0]) > 0:
-                idx = np.random.randint(len(lower_coords[0]))
-                result['kidney_left_lower_x'] = float(lower_coords[2][idx])
-                result['kidney_left_lower_y'] = float(lower_coords[1][idx])
-                result['kidney_left_lower_z'] = float(lower_coords[0][idx])
-            
-            # Объем почки в см³
-            voxel_volume = np.prod(seg_img.header.get_zooms())
-            kidney_volume_voxels = np.sum(kidney_left_mask)
-            result['kidney_left_volume_cm3'] = float(kidney_volume_voxels * voxel_volume / 1000.0)
-            
-            # Длина почки в мм
-            kidney_length_voxels = z_upper - z_lower + 1
-            result['kidney_left_length_mm'] = float(kidney_length_voxels * seg_img.header.get_zooms()[0])
-        
+        affine = seg_img.affine
+        zooms = tuple(float(z) for z in seg_img.header.get_zooms()[:3])
+
+        result: Dict[str, Optional[float]] = {}
+        for label_id, prefix in ((8, "kidney_right"), (9, "kidney_left")):
+            mask = seg_data == label_id
+            if not np.any(mask):
+                continue
+            kidney_feats = kidney_features_from_mask(mask, affine, zooms, prefix)
+            result.update(kidney_feats)
+
         return result
-        
+
     except Exception as e:
         print(f"Error extracting kidney coordinates: {e}")
         return {}
@@ -427,7 +362,7 @@ def _run_totalsegmentator(dicom_folder: Path, output_path: Path, kidney_only: bo
         except (TypeError, Exception) as e:
             # Если API не поддерживает roi_subset, пробуем базовый вызов
             if kidney_only:
-                print(f"  ⚠️ ROI subset не поддерживается, пробуем полную сегментацию: {e}")
+                print(f"  [WARN] ROI subset unsupported, full segmentation: {e}")
                 kwargs.pop('roi_subset', None)
                 totalsegmentator(**kwargs)
             else:
@@ -446,280 +381,165 @@ def _run_totalsegmentator(dicom_folder: Path, output_path: Path, kidney_only: bo
                 
     except MemoryError as e:
         print(f"Memory error in TotalSegmentator: {e}")
-        print("  💡 Попробуйте увеличить оперативную память или использовать --disable-kidney-segmentation")
+        print("  [hint] increase RAM or use --disable-kidney-segmentation")
     except Exception as e:
         print(f"Error running TotalSegmentator: {e}")
         
     return None
 
 
-def _extract_kidney_coordinates_lightweight(dicom_folder: Path) -> Dict[str, Optional[float]]:
-    """Легковесное извлечение координат почек с относительными координатами"""
+def _lightweight_kidney_side(
+    patient_mm: np.ndarray,
+    spine_x: Optional[float],
+) -> str:
+    if spine_x is not None and patient_kidney_side is not None:
+        return patient_kidney_side(float(patient_mm[0]), float(spine_x))
+    return "left" if patient_mm[0] >= 0 else "right"
+
+
+def _aggregate_kidney_side_3d(
+    candidates: List[Dict],
+    prefix: str,
+) -> Dict[str, float]:
+    """Aggregate multi-slice HU kidney detections into volume/length/center in patient mm."""
+    if not candidates:
+        return {}
+
+    total_area = sum(c["area"] for c in candidates)
+    if total_area <= 0:
+        return {}
+
+    center = np.zeros(3, dtype=float)
+    z_vals: List[float] = []
+    voxel_volume_mm3 = 0.0
+    in_plane_lengths: List[float] = []
+
+    for c in candidates:
+        w = c["area"] / total_area
+        center += w * c["patient_mm"]
+        z_vals.append(float(c["patient_mm"][2]))
+        voxel_volume_mm3 += c["area"] * c["voxel_volume_mm3"]
+        in_plane_lengths.append(c["in_plane_length_mm"])
+
+    z_min, z_max = min(z_vals), max(z_vals)
+    cranio_caudal_mm = z_max - z_min
+    length_mm = max(cranio_caudal_mm, max(in_plane_lengths) if in_plane_lengths else 0.0)
+    volume_cm3 = voxel_volume_mm3 / 1000.0
+
+    out: Dict[str, float] = {}
+    for axis, i in zip("xyz", range(3)):
+        val = float(center[i])
+        out[f"{prefix}_center_{axis}"] = val
+        out[f"{prefix}_middle_{axis}"] = val
+        out[f"{prefix}_upper_{axis}"] = val if axis != "z" else z_max
+        out[f"{prefix}_lower_{axis}"] = val if axis != "z" else z_min
+
+    out[f"{prefix}_volume_cm3"] = float(volume_cm3)
+    out[f"{prefix}_length_mm"] = float(length_mm)
+    out[f"{prefix}_delta_x"] = float("nan")
+    out[f"{prefix}_delta_y"] = float("nan")
+    out[f"{prefix}_delta_z"] = float("nan")
+    return out
+
+
+def _extract_kidney_coordinates_lightweight(
+    dicom_folder: Path,
+    spine_hint_x: Optional[float] = None,
+) -> Dict[str, Optional[float]]:
+    """HU-based 3D kidney tracking in patient LPS mm (no synthetic deltas or fixed Z offsets)."""
     if measure is None or morphology is None or ndimage is None:
         return {}
-    
+    if dicom_centroid_to_patient_mm is None:
+        return {}
+
     try:
-        # Загружаем только центральные срезы для экономии памяти
         slice_infos = _list_dicom_slices(dicom_folder)
-        if len(slice_infos) < 20:
+        if len(slice_infos) < 10:
             return {}
-        
-        # Сортируем и берем центральные 30%
+
         slice_infos.sort(key=lambda x: x.position[2])
         n_slices = len(slice_infos)
-        start_idx = n_slices // 3
-        end_idx = 2 * n_slices // 3
+        start_idx = n_slices // 4
+        end_idx = 3 * n_slices // 4
         central_slices = slice_infos[start_idx:end_idx]
-        
-        # Параметры обработки
-        KIDNEY_HU_MIN, KIDNEY_HU_MAX = 20, 60
-        MIN_VOLUME = 1000
-        MAX_VOLUME = 50000
-        MAX_ECCENTRICITY = 0.9
-        
-        kidney_candidates = []
-        slice_data = {}  # Храним данные срезов для анализа
-        
-        # Обрабатываем каждый срез
+
+        kidney_hu_min, kidney_hu_max = 20, 60
+        min_area = 400
+        max_area = 80000
+        max_eccentricity = 0.92
+
+        candidates: List[Dict] = []
+        spine_x_samples: List[float] = []
+
         for slice_info in central_slices:
             try:
                 ds = pydicom.dcmread(str(slice_info.path), force=True)
-                
-                # Конвертируем в Hounsfield Units
                 pixel_array = ds.pixel_array.astype(np.float32)
-                slope = getattr(ds, 'RescaleSlope', 1.0)
-                intercept = getattr(ds, 'RescaleIntercept', 0.0)
+                slope = getattr(ds, "RescaleSlope", 1.0)
+                intercept = getattr(ds, "RescaleIntercept", 0.0)
                 hu_array = pixel_array * slope + intercept
-                
-                # Создаем маску почек
-                kidney_mask = (hu_array >= KIDNEY_HU_MIN) & (hu_array <= KIDNEY_HU_MAX)
-                kidney_mask = kidney_mask & (hu_array < 150)  # исключаем кости
-                kidney_mask = kidney_mask & (hu_array > -50)  # исключаем воздух
-                
-                # Морфологическая очистка
+
+                kidney_mask = (hu_array >= kidney_hu_min) & (hu_array <= kidney_hu_max)
+                kidney_mask = kidney_mask & (hu_array < 150) & (hu_array > -50)
                 try:
-                    # Используем новый параметр max_size вместо min_size
                     kidney_mask = morphology.remove_small_objects(kidney_mask, max_size=49)
                 except TypeError:
-                    # Fallback для старых версий
                     kidney_mask = morphology.remove_small_objects(kidney_mask, min_size=50)
                 kidney_mask = ndimage.binary_fill_holes(kidney_mask)
-                
-                # Сохраняем данные среза
-                slice_data[slice_info.position[2]] = {
-                    'hu_array': hu_array,
-                    'kidney_mask': kidney_mask,
-                    'pixel_spacing': getattr(ds, 'PixelSpacing', [1.0, 1.0]),
-                    'slice_thickness': getattr(ds, 'SliceThickness', 1.0)
-                }
-                
-                # Анализ компонентов
+
+                pixel_spacing = getattr(ds, "PixelSpacing", [1.0, 1.0])
+                slice_thickness = float(getattr(ds, "SliceThickness", 1.0) or 1.0)
+                voxel_volume_mm3 = float(pixel_spacing[0]) * float(pixel_spacing[1]) * slice_thickness
+
+                bone_mask = hu_array >= 300
+                if np.any(bone_mask):
+                    labeled_bones = measure.label(bone_mask)
+                    for region in measure.regionprops(labeled_bones):
+                        if region.area < 80:
+                            continue
+                        bone_mm = dicom_centroid_to_patient_mm(ds, region.centroid[0], region.centroid[1])
+                        spine_x_samples.append(float(bone_mm[0]))
+
                 labeled_mask = measure.label(kidney_mask)
-                regions = measure.regionprops(labeled_mask)
-                
-                # Фильтрация кандидатов
-                for region in regions:
-                    if (MIN_VOLUME <= region.area <= MAX_VOLUME and 
-                        region.eccentricity < MAX_ECCENTRICITY):
-                        
-                        # Определяем положение относительно центра
-                        centroid = region.centroid
-                        image_center_x = hu_array.shape[1] / 2
-                        side = 'left' if centroid[1] < image_center_x else 'right'
-                        
-                        kidney_candidates.append({
-                            'slice_z': slice_info.position[2],
-                            'side': side,
-                            'centroid_x': centroid[1],
-                            'centroid_y': centroid[0],
-                            'area': region.area,
-                            'bbox': region.bbox,
-                            'eccentricity': region.eccentricity,
-                            'solidity': region.solidity,
-                            'extent': region.extent
-                        })
-                        
+                for region in measure.regionprops(labeled_mask):
+                    if not (min_area <= region.area <= max_area and region.eccentricity < max_eccentricity):
+                        continue
+                    patient_mm = dicom_centroid_to_patient_mm(ds, region.centroid[0], region.centroid[1])
+                    min_r, min_c, max_r, max_c = region.bbox
+                    in_plane_length = max(
+                        (max_r - min_r + 1) * float(pixel_spacing[0]),
+                        (max_c - min_c + 1) * float(pixel_spacing[1]),
+                    )
+                    candidates.append({
+                        "patient_mm": patient_mm,
+                        "area": float(region.area),
+                        "voxel_volume_mm3": voxel_volume_mm3,
+                        "in_plane_length_mm": in_plane_length,
+                    })
             except Exception:
                 continue
-        
-        if not kidney_candidates:
+
+        if not candidates:
             return {}
-        
-        # Группируем по стороне и выбираем лучшие кандидаты
-        left_kidneys = [k for k in kidney_candidates if k['side'] == 'left']
-        right_kidneys = [k for k in kidney_candidates if k['side'] == 'right']
-        
-        # Выбираем по одному кандидату на сторону
-        left_kidney = max(left_kidneys, key=lambda x: x['area']) if left_kidneys else None
-        right_kidney = max(right_kidneys, key=lambda x: x['area']) if right_kidneys else None
-        
-        result = {}
-        
-        # Вычисляем центры тела и позвоночника
-        body_center_x, body_center_y, spine_center_x, spine_center_y = _compute_body_centers(slice_data)
-        
-        # Извлекаем координаты для каждой почки
-        for kidney, prefix in [(left_kidney, 'kidney_left'), (right_kidney, 'kidney_right')]:
-            if kidney:
-                # Абсолютные координаты
-                result[f'{prefix}_upper_x'] = float(kidney['centroid_x'])
-                result[f'{prefix}_upper_y'] = float(kidney['centroid_y'])
-                result[f'{prefix}_upper_z'] = float(kidney['slice_z'] + 5)
-                
-                result[f'{prefix}_middle_x'] = float(kidney['centroid_x'])
-                result[f'{prefix}_middle_y'] = float(kidney['centroid_y'])
-                result[f'{prefix}_middle_z'] = float(kidney['slice_z'])
-                
-                result[f'{prefix}_lower_x'] = float(kidney['centroid_x'])
-                result[f'{prefix}_lower_y'] = float(kidney['centroid_y'])
-                result[f'{prefix}_lower_z'] = float(kidney['slice_z'] - 5)
-                
-                # Нормализованные координаты (как в kits19)
-                # Нормализация к [-1, 1] диапазону
-                image_center_x = hu_array.shape[1] / 2
-                image_center_y = hu_array.shape[0] / 2
-                image_center_z = slice_data[kidney['slice_z']]['slice_thickness'] * len(slice_data) / 2
-                
-                result[f'{prefix}_upper_x_norm'] = (float(kidney['centroid_x']) - image_center_x) / image_center_x
-                result[f'{prefix}_upper_y_norm'] = (float(kidney['centroid_y']) - image_center_y) / image_center_y
-                result[f'{prefix}_upper_z_norm'] = (float(kidney['slice_z'] + 5) - image_center_z) / image_center_z
-                
-                result[f'{prefix}_middle_x_norm'] = (float(kidney['centroid_x']) - image_center_x) / image_center_x
-                result[f'{prefix}_middle_y_norm'] = (float(kidney['centroid_y']) - image_center_y) / image_center_y
-                result[f'{prefix}_middle_z_norm'] = (float(kidney['slice_z']) - image_center_z) / image_center_z
-                
-                result[f'{prefix}_lower_x_norm'] = (float(kidney['centroid_x']) - image_center_x) / image_center_x
-                result[f'{prefix}_lower_y_norm'] = (float(kidney['centroid_y']) - image_center_y) / image_center_y
-                result[f'{prefix}_lower_z_norm'] = (float(kidney['slice_z'] - 5) - image_center_z) / image_center_z
-                
-                # Относительные координаты к позвоночнику (vs_spine_x/y/z - как в kits19)
-                if spine_center_x is not None and spine_center_y is not None:
-                    result[f'{prefix}_vs_spine_x'] = float(kidney['centroid_x'] - spine_center_x)
-                    result[f'{prefix}_vs_spine_y'] = float(kidney['centroid_y'] - spine_center_y)
-                    result[f'{prefix}_vs_spine_z'] = float(kidney['slice_z'] - image_center_z)
-                else:
-                    result[f'{prefix}_vs_spine_x'] = 0.0
-                    result[f'{prefix}_vs_spine_y'] = 0.0
-                    result[f'{prefix}_vs_spine_z'] = 0.0
-                
-                # Центр почки (как в kits19)
-                result[f'{prefix}_center_x'] = float(kidney['centroid_x'])
-                result[f'{prefix}_center_y'] = float(kidney['centroid_y'])
-                result[f'{prefix}_center_z'] = float(kidney['slice_z'])
-                
-                # Размеры почки (как в kits19)
-                min_y, min_x, max_y, max_x = kidney['bbox']
-                pixel_spacing = slice_data[kidney['slice_z']]['pixel_spacing']
-                slice_thickness = slice_data[kidney['slice_z']]['slice_thickness']
-                
-                result[f'{prefix}_length_mm'] = float((max_y - min_y + 1) * pixel_spacing[1])
-                result[f'{prefix}_width_mm'] = float((max_x - min_x + 1) * pixel_spacing[0])
-                result[f'{prefix}_depth_mm'] = float(30.0 * slice_thickness)  # приближение по Z
-                
-                # Объем почки
-                voxel_volume = pixel_spacing[0] * pixel_spacing[1] * slice_thickness
-                result[f'{prefix}_volume_cm3'] = float(kidney['area'] * voxel_volume / 1000.0)
-                
-                # Медицинские признаки (как в kits19)
-                result[f'{prefix}_tumor_volume_cm3'] = 0.0  # Будет вычислено при наличии опухоли
-                result[f'{prefix}_density'] = 1.05  # Стандартная плотность почки
-                result[f'{prefix}_tumor_percentage'] = 0.0
-                
-                # Синтетические смещения (как в kits19)
-                if prefix == 'kidney_left':
-                    result[f'{prefix}_delta_x'] = 12.5  # Среднее смещение для левой почки
-                    result[f'{prefix}_delta_y'] = 4.2
-                    result[f'{prefix}_delta_z'] = 8.1
-                else:  # kidney_right
-                    result[f'{prefix}_delta_x'] = -8.3  # Среднее смещение для правой почки
-                    result[f'{prefix}_delta_y'] = 3.8
-                    result[f'{prefix}_delta_z'] = 7.9
-        
+
+        spine_x = spine_hint_x
+        if spine_x is None and spine_x_samples:
+            spine_x = float(np.median(spine_x_samples))
+
+        left_cands = [
+            c for c in candidates
+            if _lightweight_kidney_side(c["patient_mm"], spine_x) == "left"
+        ]
+        right_cands = [
+            c for c in candidates
+            if _lightweight_kidney_side(c["patient_mm"], spine_x) == "right"
+        ]
+
+        result: Dict[str, Optional[float]] = {}
+        result.update(_aggregate_kidney_side_3d(left_cands, "kidney_left"))
+        result.update(_aggregate_kidney_side_3d(right_cands, "kidney_right"))
         return result
-        
-    except Exception as e:
-        print(f"Error in lightweight kidney detection: {e}")
-        return {}
-        
-        # Извлекаем координаты для каждой почки
-        for kidney, prefix in [(left_kidney, 'kidney_left'), (right_kidney, 'kidney_right')]:
-            if kidney:
-                # Абсолютные координаты
-                result[f'{prefix}_upper_x'] = float(kidney['centroid_x'])
-                result[f'{prefix}_upper_y'] = float(kidney['centroid_y'])
-                result[f'{prefix}_upper_z'] = float(kidney['slice_z'] + 5)
-                
-                result[f'{prefix}_middle_x'] = float(kidney['centroid_x'])
-                result[f'{prefix}_middle_y'] = float(kidney['centroid_y'])
-                result[f'{prefix}_middle_z'] = float(kidney['slice_z'])
-                
-                result[f'{prefix}_lower_x'] = float(kidney['centroid_x'])
-                result[f'{prefix}_lower_y'] = float(kidney['centroid_y'])
-                result[f'{prefix}_lower_z'] = float(kidney['slice_z'] - 5)
-                
-                # Нормализованные координаты (как в kits19)
-                # Нормализация к [-1, 1] диапазону
-                image_center_x = hu_array.shape[1] / 2
-                image_center_y = hu_array.shape[0] / 2
-                image_center_z = slice_data[kidney['slice_z']]['slice_thickness'] * len(slice_data) / 2
-                
-                result[f'{prefix}_upper_x_norm'] = (float(kidney['centroid_x']) - image_center_x) / image_center_x
-                result[f'{prefix}_upper_y_norm'] = (float(kidney['centroid_y']) - image_center_y) / image_center_y
-                result[f'{prefix}_upper_z_norm'] = (float(kidney['slice_z'] + 5) - image_center_z) / image_center_z
-                
-                result[f'{prefix}_middle_x_norm'] = (float(kidney['centroid_x']) - image_center_x) / image_center_x
-                result[f'{prefix}_middle_y_norm'] = (float(kidney['centroid_y']) - image_center_y) / image_center_y
-                result[f'{prefix}_middle_z_norm'] = (float(kidney['slice_z']) - image_center_z) / image_center_z
-                
-                result[f'{prefix}_lower_x_norm'] = (float(kidney['centroid_x']) - image_center_x) / image_center_x
-                result[f'{prefix}_lower_y_norm'] = (float(kidney['centroid_y']) - image_center_y) / image_center_y
-                result[f'{prefix}_lower_z_norm'] = (float(kidney['slice_z'] - 5) - image_center_z) / image_center_z
-                
-                # Относительные координаты к позвоночнику (vs_spine_x/y/z - как в kits19)
-                if spine_center_x is not None and spine_center_y is not None:
-                    result[f'{prefix}_vs_spine_x'] = float(kidney['centroid_x'] - spine_center_x)
-                    result[f'{prefix}_vs_spine_y'] = float(kidney['centroid_y'] - spine_center_y)
-                    result[f'{prefix}_vs_spine_z'] = float(kidney['slice_z'] - image_center_z)
-                else:
-                    result[f'{prefix}_vs_spine_x'] = 0.0
-                    result[f'{prefix}_vs_spine_y'] = 0.0
-                    result[f'{prefix}_vs_spine_z'] = 0.0
-                
-                # Центр почки (как в kits19)
-                result[f'{prefix}_center_x'] = float(kidney['centroid_x'])
-                result[f'{prefix}_center_y'] = float(kidney['centroid_y'])
-                result[f'{prefix}_center_z'] = float(kidney['slice_z'])
-                
-                # Размеры почки (как в kits19)
-                min_y, min_x, max_y, max_x = kidney['bbox']
-                pixel_spacing = slice_data[kidney['slice_z']]['pixel_spacing']
-                slice_thickness = slice_data[kidney['slice_z']]['slice_thickness']
-                
-                result[f'{prefix}_length_mm'] = float((max_y - min_y + 1) * pixel_spacing[1])
-                result[f'{prefix}_width_mm'] = float((max_x - min_x + 1) * pixel_spacing[0])
-                result[f'{prefix}_depth_mm'] = float(30.0 * slice_thickness)  # приближение по Z
-                
-                # Объем почки
-                voxel_volume = pixel_spacing[0] * pixel_spacing[1] * slice_thickness
-                result[f'{prefix}_volume_cm3'] = float(kidney['area'] * voxel_volume / 1000.0)
-                
-                # Медицинские признаки (как в kits19)
-                result[f'{prefix}_tumor_volume_cm3'] = 0.0  # Будет вычислено при наличии опухоли
-                result[f'{prefix}_density'] = 1.05  # Стандартная плотность почки
-                result[f'{prefix}_tumor_percentage'] = 0.0
-                
-                # Синтетические смещения (как в kits19)
-                if prefix == 'kidney_left':
-                    result[f'{prefix}_delta_x'] = 12.5  # Среднее смещение для левой почки
-                    result[f'{prefix}_delta_y'] = 4.2
-                    result[f'{prefix}_delta_z'] = 8.1
-                else:  # kidney_right
-                    result[f'{prefix}_delta_x'] = -8.3  # Среднее смещение для правой почки
-                    result[f'{prefix}_delta_y'] = 3.8
-                    result[f'{prefix}_delta_z'] = 7.9
-        
-        return result
-        
+
     except Exception as e:
         print(f"Error in lightweight kidney detection: {e}")
         return {}
@@ -985,6 +805,110 @@ def _extract_spine_features_slice(hu_array: np.ndarray, body_com_x: float, body_
     return {}
 
 
+def _extract_slice_anatomy_patient(
+    ds,
+    hu_array: np.ndarray,
+    slice_z: float,
+) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """Body/spine metrics for one slice in patient LPS mm."""
+    pixel_spacing = getattr(ds, "PixelSpacing", [1.0, 1.0])
+    body_mask = (hu_array >= -300) & (hu_array <= 300)
+
+    body_features: Dict[str, float] = {}
+    spine_features: Dict[str, float] = {}
+    if not np.any(body_mask) or dicom_centroid_to_patient_mm is None:
+        return body_features, spine_features
+
+    y_idx, x_idx = np.where(body_mask)
+    step = max(1, len(y_idx) // 400)
+    pts = np.array([
+        dicom_centroid_to_patient_mm(ds, float(y_idx[i]), float(x_idx[i]))
+        for i in range(0, len(y_idx), step)
+    ], dtype=float)
+
+    body_features = {
+        "body_width_mm": float(pts[:, 0].max() - pts[:, 0].min()),
+        "body_depth_mm": float(pts[:, 1].max() - pts[:, 1].min()),
+        "body_area_mm2": float(len(y_idx) * pixel_spacing[0] * pixel_spacing[1]),
+        "body_com_x": float(pts[:, 0].mean()),
+        "body_com_y": float(pts[:, 1].mean()),
+        "body_com_z": float(pts[:, 2].mean()),
+        "slice_z": float(slice_z),
+        "body_pixels": float(len(y_idx)),
+    }
+
+    bone_mask = hu_array >= 300
+    if np.any(bone_mask) and measure is not None:
+        labeled_bones = measure.label(bone_mask)
+        if labeled_bones is not None:
+            body_com_x = body_features["body_com_x"]
+            body_com_y = body_features["body_com_y"]
+            spine_region = None
+            min_distance = float("inf")
+            for region in measure.regionprops(labeled_bones):
+                if region.area < 80:
+                    continue
+                bone_mm = dicom_centroid_to_patient_mm(ds, region.centroid[0], region.centroid[1])
+                dist = float(np.linalg.norm(bone_mm[:2] - np.array([body_com_x, body_com_y])))
+                if dist < min_distance:
+                    min_distance = dist
+                    spine_region = bone_mm
+            if spine_region is not None:
+                spine_features = {
+                    "spine_center_x_mm": float(spine_region[0]),
+                    "spine_center_y_mm": float(spine_region[1]),
+                    "spine_center_z_mm": float(spine_region[2]),
+                }
+
+    fat_mask = (hu_array >= -190) & (hu_array <= -30)
+    bone_px = float(np.sum(hu_array >= 300))
+    body_features["fat_pixels"] = float(np.sum(fat_mask))
+    body_features["bone_pixels"] = bone_px
+    return body_features, spine_features
+
+
+def _run_kidney_extraction(
+    dicom_folder: Path,
+    *,
+    enable_kidney_segmentation: bool,
+    kidney_only: bool,
+    show_progress: bool,
+    spine_hint_x: Optional[float],
+) -> Dict[str, Optional[float]]:
+    if not enable_kidney_segmentation:
+        return {}
+
+    if show_progress:
+        print("  [kidney] detection...")
+
+    def _lightweight() -> Dict[str, Optional[float]]:
+        return _extract_kidney_coordinates_lightweight(dicom_folder, spine_hint_x=spine_hint_x)
+
+    if totalsegmentator is not None and not kidney_only:
+        try:
+            import tempfile
+            import gc
+            try:
+                import psutil
+                available_memory_gb = psutil.virtual_memory().available / (1024 ** 3)
+                if available_memory_gb < 4.0:
+                    return _lightweight()
+            except ImportError:
+                pass
+
+            gc.collect()
+            temp_dir = Path(tempfile.mkdtemp())
+            seg_file = _run_totalsegmentator(dicom_folder, temp_dir, kidney_only)
+            if seg_file:
+                return _extract_kidney_coordinates_from_segmentation(seg_file)
+            return _lightweight()
+        except MemoryError:
+            return _lightweight()
+        except Exception:
+            return _lightweight()
+    return _lightweight()
+
+
 def extract_features_from_dicom_folder(
     dicom_folder: Path,
     downsample: int = 2,
@@ -1007,10 +931,10 @@ def extract_features_from_dicom_folder(
     
     # Показываем прогресс если нужно
     if show_progress:
-        print(f"  📋 Найдено DICOM срезов: {len(slice_infos)}")
+        print(f"  slices found: {len(slice_infos)}")
         if max_slices:
-            print(f"  📋 Будет обработано срезов: {min(len(slice_infos), max_slices)}")
-        print(f"  🔬 Стратегия выборки: {slice_strategy}")
+            print(f"  slices to process: {min(len(slice_infos), max_slices)}")
+        print(f"  slice strategy: {slice_strategy}")
     
     # Извлечение метаданных из первого среза
     patient_name = None
@@ -1026,8 +950,6 @@ def extract_features_from_dicom_folder(
         'bmi': None,
         'body_type': None,
     }
-    kidney_features: Dict[str, Optional[float]] = {}
-
     try:
         ds0 = pydicom.dcmread(str(slice_infos[0].path), stop_before_pixels=True, force=True)
         patient_name = _safe_str(getattr(ds0, 'PatientName', None)) or None
@@ -1042,7 +964,7 @@ def extract_features_from_dicom_folder(
     # Проверяем минимальное количество срезов
     if len(slice_infos) < 3:
         if show_progress:
-            print(f"  ⚠️ Слишком мало срезов ({len(slice_infos)}), нужно минимум 3")
+            print(f"  [WARN] too few slices ({len(slice_infos)}), need >= 3")
         # Возвращаем базовую информацию без координат почек
         return {
             'patient_id': patient_id,
@@ -1060,95 +982,18 @@ def extract_features_from_dicom_folder(
         original_count = len(slice_infos)
         slice_infos = _adaptive_slice_selection(slice_infos, max_slices, slice_strategy)
         if show_progress:
-            print(f"  📋 Адаптивная выборка: {original_count} → {len(slice_infos)} срезов")
+            print(f"  adaptive selection: {original_count} -> {len(slice_infos)} slices")
     elif max_slices is None:
         max_slices = len(slice_infos)
     
-    # Извлечение координат почек
-    if enable_kidney_segmentation:
-        if show_progress:
-            print(f"  🔍 Поиск почек...")
-            
-        if totalsegmentator is not None and not kidney_only:
-            # Пробуем TotalSegmentator с проверкой памяти
-            try:
-                import tempfile
-                import gc
-                import psutil
-                
-                if show_progress:
-                    print(f"  🤖 Запуск TotalSegmentator...")
-                
-                # Проверяем доступную память
-                available_memory_gb = psutil.virtual_memory().available / (1024**3)
-                if show_progress:
-                    print(f"  💾 Доступно памяти: {available_memory_gb:.1f} ГБ")
-                
-                # Если памяти меньше 4 ГБ, используем lightweight
-                if available_memory_gb < 4.0:
-                    if show_progress:
-                        print(f"  ⚠️ Недостаточно памяти для TotalSegmentator, используем lightweight")
-                    kidney_features = _extract_kidney_coordinates_lightweight(dicom_folder)
-                else:
-                    gc.collect()
-                    temp_dir = Path(tempfile.mkdtemp())
-                    
-                    seg_file = _run_totalsegmentator(dicom_folder, temp_dir, kidney_only)
-                    
-                    if seg_file:
-                        kidney_features = _extract_kidney_coordinates_from_segmentation(seg_file)
-                        if show_progress:
-                            print(f"  ✅ TotalSegmentator: извлечены координаты почек")
-                    else:
-                        if show_progress:
-                            print(f"  ⚠️ TotalSegmentator не удалось, используем lightweight детекцию")
-                        kidney_features = _extract_kidney_coordinates_lightweight(dicom_folder)
-                    
-            except ImportError:
-                # psutil не доступен, пробуем TotalSegmentator
-                if show_progress:
-                    print(f"  🤖 Запуск TotalSegmentator...")
-                
-                gc.collect()
-                temp_dir = Path(tempfile.mkdtemp())
-                
-                seg_file = _run_totalsegmentator(dicom_folder, temp_dir, kidney_only)
-                
-                if seg_file:
-                    kidney_features = _extract_kidney_coordinates_from_segmentation(seg_file)
-                    if show_progress:
-                        print(f"  ✅ TotalSegmentator: извлечены координаты почек")
-                else:
-                    if show_progress:
-                        print(f"  ⚠️ TotalSegmentator не удалось, используем lightweight детекцию")
-                    kidney_features = _extract_kidney_coordinates_lightweight(dicom_folder)
-                    
-            except MemoryError:
-                if show_progress:
-                    print(f"  💡 Недостаточно памяти, используем lightweight детекцию")
-                kidney_features = _extract_kidney_coordinates_lightweight(dicom_folder)
-                    
-            except Exception as e:
-                if show_progress:
-                    print(f"  ⚠️ Ошибка TotalSegmentator: {e}")
-                    print(f"  💡 Используем lightweight детекцию почек")
-                kidney_features = _extract_kidney_coordinates_lightweight(dicom_folder)
-        else:
-            # Легковесное извлечение
-            if show_progress:
-                print(f"  🔍 Lightweight детекция почек...")
-            kidney_features = _extract_kidney_coordinates_lightweight(dicom_folder)
-            if show_progress:
-                print(f"  ✅ Lightweight: извлечены координаты почек")
-    
-    # Обработка срезов
+    # Обработка срезов (body/spine в patient mm — до почек)
     if show_progress:
-        print(f"  🔄 Обработка {len(slice_infos)} срезов...")
+        print(f"  processing {len(slice_infos)} slices...")
         
     thickness_mm = _estimate_slice_thickness_mm(slice_infos)
     
     # Агрегаты тела
-    body_acc = {
+    body_acc: Dict[str, object] = {
         'body_pixels': 0.0,
         'fat_pixels': 0.0,
         'bone_pixels': 0.0,
@@ -1157,24 +1002,27 @@ def extract_features_from_dicom_folder(
         'body_area_mm2': [],
         'body_com_x_mm': [],
         'body_com_y_mm': [],
+        'body_com_z_mm': [],
     }
     
     spine_acc = {
         'spine_center_x_mm': [],
         'spine_center_y_mm': [],
+        'spine_center_z_mm': [],
         'spine_to_skin_left_mm': [],
         'spine_to_skin_right_mm': [],
         'spine_to_skin_anterior_mm': [],
         'spine_to_skin_posterior_mm': [],
     }
-    
+    slice_metrics: List[Dict[str, float]] = []
+
     processed_slices = 0
     for i, slice_info in enumerate(slice_infos):
         try:
             # Показываем прогресс обработки срезов
             if show_progress and (i % max(1, len(slice_infos) // 10) == 0 or i == len(slice_infos) - 1):
                 progress = (i + 1) / len(slice_infos) * 100
-                print(f"    🔄 Обработка среза {i+1}/{len(slice_infos)} ({progress:.0f}%)")
+                print(f"    slice {i+1}/{len(slice_infos)} ({progress:.0f}%)")
             
             ds = pydicom.dcmread(str(slice_info.path), force=True)
             
@@ -1190,25 +1038,22 @@ def extract_features_from_dicom_folder(
                            hu_array.shape[1] // downsample)
                 hu_array = hu_array[::downsample, ::downsample]
             
-            pixel_spacing = getattr(ds, 'PixelSpacing', [1.0, 1.0])
-            
-            # Извлечение признаков среза
-            body_features = _extract_body_features_slice(hu_array, pixel_spacing)
-            spine_features = _extract_spine_features_slice(hu_array, 
-                                                         body_features.get('body_com_x_mm', 0),
-                                                         body_features.get('body_com_y_mm', 0),
-                                                         pixel_spacing)
-            
-            # Накопление агрегатов
-            for key, value in body_features.items():
-                if key in body_acc:
-                    if isinstance(body_acc[key], list):
-                        body_acc[key].append(value)
-                    else:
-                        body_acc[key] = [value]
-            
+            slice_z = float(slice_info.position[2])
+            body_features, spine_features = _extract_slice_anatomy_patient(ds, hu_array, slice_z)
+            if body_features:
+                slice_metrics.append(body_features)
+                for key in ("body_pixels", "fat_pixels", "bone_pixels"):
+                    if key in body_features:
+                        body_acc[key] = body_acc.get(key, 0.0) + body_features[key]
+                for key in ("body_width_mm", "body_depth_mm", "body_area_mm2"):
+                    if key in body_features:
+                        body_acc[key].append(body_features[key])
+                body_acc.setdefault("body_com_x_mm", []).append(body_features["body_com_x"])
+                body_acc.setdefault("body_com_y_mm", []).append(body_features["body_com_y"])
+                body_acc.setdefault("body_com_z_mm", []).append(body_features["body_com_z"])
+
             for key, value in spine_features.items():
-                if key in spine_acc:
+                if key in spine_acc and value is not None:
                     spine_acc[key].append(value)
                     
             processed_slices += 1
@@ -1224,9 +1069,12 @@ def extract_features_from_dicom_folder(
     voxel_volume = pixel_spacing[0] * pixel_spacing[1] * slice_thickness
     
     # Тело
-    body_volume_cm3 = np.mean(body_acc['body_pixels']) * voxel_volume / 1000.0
-    fat_volume_cm3 = np.mean(body_acc['fat_pixels']) * voxel_volume / 1000.0
-    bone_volume_cm3 = np.mean(body_acc['bone_pixels']) * voxel_volume / 1000.0
+    mean_body_pixels = float(body_acc['body_pixels']) / max(processed_slices, 1)
+    mean_fat_pixels = float(body_acc['fat_pixels']) / max(processed_slices, 1)
+    mean_bone_pixels = float(body_acc['bone_pixels']) / max(processed_slices, 1)
+    body_volume_cm3 = mean_body_pixels * voxel_volume / 1000.0
+    fat_volume_cm3 = mean_fat_pixels * voxel_volume / 1000.0
+    bone_volume_cm3 = mean_bone_pixels * voxel_volume / 1000.0
     fat_ratio = fat_volume_cm3 / body_volume_cm3 if body_volume_cm3 > 0 else None
     
     # Геометрия
@@ -1234,15 +1082,52 @@ def extract_features_from_dicom_folder(
     body_depth_mm_median = _median(body_acc['body_depth_mm'])
     body_area_mm2_median = _median(body_acc['body_area_mm2'])
     
-    # Центры масс
-    body_com_x_mm = _median(body_acc['body_com_x_mm'])
-    body_com_y_mm = _median(body_acc['body_com_y_mm'])
-    body_com_z_mm = slice_infos[len(slice_infos)//2].position[2]  # центральный срез
-    
+    # Центры масс (patient LPS mm)
+    body_com_x_mm = _median(body_acc.get('body_com_x_mm', []))
+    body_com_y_mm = _median(body_acc.get('body_com_y_mm', []))
+    body_com_z_mm = _median(body_acc.get('body_com_z_mm', []))
+    if body_com_z_mm is None:
+        body_com_z_mm = slice_infos[len(slice_infos) // 2].position[2]
+
     # Позвоночник
     spine_center_x_mm = _median(spine_acc['spine_center_x_mm'])
     spine_center_y_mm = _median(spine_acc['spine_center_y_mm'])
-    spine_center_z_mm = body_com_z_mm
+    spine_center_z_mm = _median(spine_acc.get('spine_center_z_mm', []))
+    if spine_center_z_mm is None:
+        spine_center_z_mm = body_com_z_mm
+
+    kidney_features = _run_kidney_extraction(
+        dicom_folder,
+        enable_kidney_segmentation=enable_kidney_segmentation,
+        kidney_only=kidney_only,
+        show_progress=show_progress,
+        spine_hint_x=spine_center_x_mm,
+    )
+
+    kidney_z_vals = [
+        kidney_features[k]
+        for k in (
+            "kidney_left_center_z", "kidney_right_center_z",
+            "kidney_left_lower_z", "kidney_left_upper_z",
+        )
+        if kidney_features.get(k) is not None and not np.isnan(kidney_features[k])
+    ]
+    if kidney_z_vals and aggregate_body_at_z_band is not None and slice_metrics:
+        z_min = float(min(kidney_z_vals))
+        z_max = float(max(kidney_z_vals))
+        band_body = aggregate_body_at_z_band(slice_metrics, z_min, z_max)
+        if band_body.get("body_width_mm") is not None:
+            body_width_mm_median = band_body["body_width_mm"]
+        if band_body.get("body_depth_mm") is not None:
+            body_depth_mm_median = band_body["body_depth_mm"]
+        if band_body.get("body_area_mm2") is not None:
+            body_area_mm2_median = band_body["body_area_mm2"]
+        if band_body.get("body_com_x") is not None:
+            body_com_x_mm = band_body["body_com_x"]
+        if band_body.get("body_com_y") is not None:
+            body_com_y_mm = band_body["body_com_y"]
+        if band_body.get("body_com_z") is not None:
+            body_com_z_mm = band_body["body_com_z"]
     
     # Расстояния до кожи
     spine_to_skin_left_mm_median = _median([x for x in spine_acc['spine_to_skin_left_mm'] if x is not None])
@@ -1281,8 +1166,19 @@ def extract_features_from_dicom_folder(
     }
     
     if show_progress:
-        print(f"  ✅ Обработка завершена: {processed_slices} срезов")
-    
+        print(f"  [OK] slices processed: {processed_slices}")
+
+    if merge_spine_relative is not None:
+        features = merge_spine_relative(
+            features,
+            spine_center_x_mm,
+            spine_center_y_mm,
+            spine_center_z_mm,
+        )
+    features = _add_unified_features(features)
+
+    if normalize_record is not None:
+        return normalize_record(features)
     return features
 
 
@@ -1485,11 +1381,11 @@ def main() -> int:
         args.downsample = accuracy_params['downsample']
     
     # Показываем информацию о режиме
-    print(f"🎯 Режим точности: {args.accuracy_mode.upper()}")
-    print(f"   📊 Макс. срезов: {args.max_slices}")
-    print(f"   🔽 Downsample: {args.downsample}x")
-    print(f"   📈 Ожидаемая точность: {accuracy_params['expected_accuracy']}")
-    print(f"   🔬 Стратегия выборки: {accuracy_params['slice_strategy']}")
+    print(f"[mode] accuracy: {args.accuracy_mode.upper()}")
+    print(f"   max_slices: {args.max_slices}")
+    print(f"   downsample: {args.downsample}x")
+    print(f"   expected_accuracy: {accuracy_params['expected_accuracy']}")
+    print(f"   slice_strategy: {accuracy_params['slice_strategy']}")
 
     if args.patient_folder:
         folder = Path(args.patient_folder)
@@ -1498,13 +1394,13 @@ def main() -> int:
         
         # Если это папка с DICOM файлами, обрабатываем её как один случай
         if folder.is_dir() and any(f.suffix.lower() in ['.dcm', '.dicom', '.ima'] for f in folder.iterdir()):
-            print(f"🏥 Обработка DICOM папки пациента: {folder.name}")
+            print(f"[scan] patient folder: {folder.name}")
             folders_iter = [folder]
             dicom_root = folder.parent
             total_folders = 1
         # Если это корневая папка с подпапками пациентов
         elif folder.is_dir():
-            print(f"🏥 Обработка всех DICOM подпапок в: {folder}")
+            print(f"[scan] all subfolders in: {folder}")
             folders_iter = _iter_patient_folders(folder)
             dicom_root = folder
             total_folders = len([f for f in folder.iterdir() if f.is_dir()])
@@ -1515,7 +1411,7 @@ def main() -> int:
         if not dicom_root.exists():
             raise FileNotFoundError(str(dicom_root))
         folders_iter = _iter_patient_folders(dicom_root)
-        print(f"🏥 Обработка всех DICOM папок в: {dicom_root}")
+        print(f"[scan] all DICOM folders in: {dicom_root}")
         total_folders = len([f for f in dicom_root.iterdir() if f.is_dir()])
     
     # Обработка
@@ -1525,7 +1421,7 @@ def main() -> int:
     for folder in folders_iter:
         try:
             processed_count += 1
-            print(f"📂 [{processed_count}/{total_folders}] Обработка папки: {folder.name}")
+            print(f"[{processed_count}/{total_folders}] folder: {folder.name}")
             
             feats = extract_features_from_dicom_folder(
                 folder,
@@ -1566,10 +1462,10 @@ def main() -> int:
                 **feats
             }
             rows.append(row)
-            print(f"✅ [{processed_count}/{total_folders}] {folder.name}: успешно обработано")
+            print(f"[OK] [{processed_count}/{total_folders}] {folder.name}")
                 
         except Exception as e:
-            print(f"⚠️ [{processed_count}/{total_folders}] {folder.name}: ошибка - {e}")
+            print(f"[WARN] [{processed_count}/{total_folders}] {folder.name}: {e}")
             if args.debug or True:
                 import traceback
                 traceback.print_exc()
@@ -1615,29 +1511,29 @@ def main() -> int:
     success = len([r for r in rows if r.get('status') == 'extracted'])
     errors = len([r for r in rows if r.get('status') == 'error'])
     
-    print(f"\n📊 Обработка завершена:")
-    print(f"   Всего исследований: {total}")
-    print(f"   ✅ Успешно: {success}")
-    print(f"   ⚠️ С ошибками: {errors}")
-    print(f"   📁 Результаты сохранены в: {out_path}")
+    print(f"\n[DONE] extraction finished")
+    print(f"   total: {total}")
+    print(f"   success: {success}")
+    print(f"   errors: {errors}")
+    print(f"   output: {out_path}")
     
     # Показываем первые 3 успешных случая
     successful_cases = [r for r in rows if r.get('status') == 'extracted'][:3]
     if successful_cases:
-        print(f"\n📋 Примеры успешно обработанных случаев:")
+        print(f"\n[sample] successful cases:")
         for case in successful_cases:
             case_name = case.get('case_id', 'Unknown')
             full_name = case.get('full_name', 'N/A')
-            print(f"   • {case_name}: {full_name}")
+            print(f"   - {case_name}: {full_name}")
     
     # Показываем ошибки если есть
     error_cases = [r for r in rows if r.get('status') == 'error']
     if error_cases:
-        print(f"\n⚠️ Случаи с ошибками:")
+        print(f"\n[WARN] failed cases:")
         for case in error_cases[:5]:  # Показываем первые 5 ошибок
             case_name = case.get('case_id', 'Unknown')
             error_msg = case.get('error', 'Unknown error')
-            print(f"   • {case_name}: {error_msg}")
+            print(f"   - {case_name}: {error_msg}")
         if len(error_cases) > 5:
             print(f"   ... и еще {len(error_cases) - 5} случаев с ошибками")
     

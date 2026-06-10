@@ -114,16 +114,19 @@ class AnatomicalConstraints:
         
     def apply_constraints(self, original_pos: np.ndarray, predicted_pos: np.ndarray) -> np.ndarray:
         """
-        Применение анатомических ограничений
-        
+        Применение анатомических ограничений к **абсолютной** позиции.
+
         Args:
-            original_pos: исходное положение почки
-            predicted_pos: предсказанное положение
-            
+            original_pos: исходное положение почки (мм)
+            predicted_pos: предсказанная абсолютная позиция (мм)
+
         Returns:
-            constrained_pos: скорректированное положение
+            constrained_pos: скорректированная абсолютная позиция (мм)
+
+        Для пайплайнов, где ML-модель возвращает дельту (смещение), используйте
+        ``apply_constraints_from_displacement`` — иначе дельта ошибочно трактуется
+        как координата и геометрия ломается (см. audit 1.10).
         """
-        # 1. Ограничение смещения
         displacement = predicted_pos - original_pos
         displacement = self._clamp_displacement(displacement)
         constrained_pos = original_pos + displacement
@@ -137,7 +140,29 @@ class AnatomicalConstraints:
             constrained_pos = self._clamp_to_body(constrained_pos)
         
         return constrained_pos
-    
+
+    def apply_constraints_from_displacement(
+        self,
+        original_pos: np.ndarray,
+        displacement: np.ndarray,
+    ) -> np.ndarray:
+        """Ограничить **вектор смещения** (дельту), а не абсолютную позицию.
+
+        Используется в AR/ML пайплайнах, где модель предсказывает
+        ``kidney_*_delta_{x,y,z}``. Возвращает скорректированную дельту
+        той же размерности, пригодную для ``apply_displacement``.
+        """
+        displacement = np.asarray(displacement, dtype=float)
+        displacement = self._clamp_displacement(displacement)
+        target_pos = original_pos + displacement
+
+        if self._crosses_spine(target_pos):
+            target_pos = self._resolve_spine_collision(original_pos, target_pos)
+        if not self._inside_body(target_pos):
+            target_pos = self._clamp_to_body(target_pos)
+
+        return target_pos - original_pos
+
     def _clamp_displacement(self, displacement: np.ndarray) -> np.ndarray:
         """Ограничение величины смещения"""
         # Ограничение по каждой оси
@@ -194,19 +219,19 @@ class FallbackHandler:
         self.statistical_model = statistical_model
         self.constraints = constraints
     
-    def handle_prediction(self, features: np.ndarray, ml_prediction: np.ndarray, 
+    def handle_prediction(self, features: np.ndarray, ml_prediction: np.ndarray,
                          confidence: float, original_position: np.ndarray) -> np.ndarray:
         """
-        Обработка предсказания с fallback
-        
+        Обработка предсказания с fallback.
+
         Args:
             features: признаки пациента
-            ml_prediction: предсказание ML модели
+            ml_prediction: предсказанное **смещение** (дельта, мм), не абсолютная позиция
             confidence: уверенность предсказания
-            original_position: исходное положение почки
-            
+            original_position: исходное положение почки (мм)
+
         Returns:
-            final_prediction: финальное предсказание
+            Финальное скорректированное смещение (дельта, мм)
         """
         # 1. Проверка confidence
         if confidence < 0.3:
@@ -218,10 +243,10 @@ class FallbackHandler:
             logger.warning("Anomalous prediction detected")
             return self._clamp_prediction(ml_prediction)
         
-        # 3. Применение ограничений
-        constrained_prediction = self.constraints.apply_constraints(original_position, ml_prediction)
-        
-        return constrained_prediction
+        return self.constraints.apply_constraints_from_displacement(
+            original_position,
+            ml_prediction,
+        )
     
     def _get_fallback_prediction(self, features: np.ndarray) -> np.ndarray:
         """Fallback предсказание на основе статистики"""

@@ -5,7 +5,7 @@ API сервер для предсказания смещения почек н�
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import joblib
 import numpy as np
 import pandas as pd
@@ -15,8 +15,10 @@ from datetime import datetime
 import logging
 
 # Добавляем путь к модулям
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'phase1'))
 from adaptive_ensemble import AdaptiveEnsembleTrainer
+from src.features.pipeline import predict_targets
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -59,20 +61,38 @@ class PatientData(BaseModel):
     body_com_x: float = Field(0.0, description="X-координата центра масс тела (мм)")
     body_com_y: float = Field(0.0, description="Y-координата центра масс тела (мм)")
     body_com_z: float = Field(0.0, description="Z-координата центра масс тела (мм)")
+    scan_position: Optional[str] = Field(
+        None,
+        description="DICOM PatientPosition / scan_position (HFS, FFS, ...). "
+        "Используется для patient_position_encoded при инжиниринге.",
+    )
 
 class PredictRequest(BaseModel):
     """Запрос на предсказание"""
     patient_data: PatientData
 
+class BatchPatientEntry(BaseModel):
+    """Одна запись в пакетном запросе на предсказание."""
+    patient_id: Optional[str] = Field(None, description="Идентификатор пациента")
+    patient_data: PatientData = Field(..., description="Данные пациента")
+
+
 class BatchPredictRequest(BaseModel):
-    """Запрос на пакетное предсказание"""
-    patients: List[Dict[str, PatientData]]
+    """Запрос на пакетное предсказание.
+
+    Контракт согласован с обработчиком: каждый элемент списка содержит
+    ``patient_id`` (опционально) и ``patient_data``. Ранее схема была
+    объявлена как ``List[Dict[str, PatientData]]``, что Pydantic не мог
+    корректно валидировать и приводило к рассинхрону с фактической
+    обработкой.
+    """
+    patients: List[BatchPatientEntry]
 
 class PredictResponse(BaseModel):
     """Ответ предсказания"""
     success: bool
     predictions: Dict[str, float]
-    metadata: Dict[str, any]
+    metadata: Dict[str, Any]
 
 def load_model():
     """Загрузка модели при старте сервера"""
@@ -86,9 +106,9 @@ def load_model():
         # Инициализация тренера для создания признаков
         trainer = AdaptiveEnsembleTrainer()
         
-        # Получение имен признаков
         feature_names = model_data['feature_names']
-        
+        trainer.feature_names = feature_names
+
         logger.info(f"Модель успешно загружена. Признаков: {len(feature_names)}")
         return True
         
@@ -96,46 +116,48 @@ def load_model():
         logger.error(f"Ошибка загрузки модели: {e}")
         return False
 
-def create_features(patient_data: PatientData) -> pd.DataFrame:
-    """Создание всех необходимых признаков из базовых данных"""
-    # Преобразуем в DataFrame
-    data_dict = patient_data.dict()
-    df = pd.DataFrame([data_dict])
-    
-    # Создаем инженерные признаки
-    df = trainer._create_engineered_features(df)
-    
-    # Создаем cross-features
-    df = trainer._create_cross_features(df)
-    
-    return df
-
 def predict_displacement(patient_data: PatientData) -> Dict[str, float]:
-    """Выполнение предсказания смещения почек"""
+    """Выполнение предсказания смещения почек.
+
+    Пайплайн признаков СТРОГО соответствует обучающему:
+      base + engineered + cross features -> imputer.transform -> scaler.transform -> model.predict
+
+    `imputer` в пакете модели опционален (для обратной совместимости
+    со старыми pkl, сохранёнными до добавления imputer в save_model).
+    Если его нет, выводим warning один раз и пропускаем шаг — но это
+    означает, что любые NaN после feature-engineering приведут к NaN в
+    предсказании.
+
+    Семантика HTTP-кодов:
+      - 400: проблема в данных клиента (невалидные/отсутствующие признаки);
+      - 503: модель не загружена (артефакты не доступны);
+      - 500: непредвиденная серверная ошибка.
+    """
+    if model_data is None or feature_names is None:
+        raise HTTPException(status_code=503, detail="Модель не загружена")
+
+    if hasattr(patient_data, "model_dump"):
+        patient_dict = patient_data.model_dump()
+    else:
+        patient_dict = patient_data.dict()
+
     try:
-        # Создание признаков
-        df = create_features(patient_data)
-        
-        # Проверка наличия всех необходимых признаков
-        missing_features = [f for f in feature_names if f not in df.columns]
-        if missing_features:
-            raise HTTPException(status_code=400, detail=f"Отсутствующие признаки: {missing_features}")
-        
-        # Подготовка данных
-        X = df[feature_names].values
-        X_scaled = model_data['scaler'].transform(X)
-        
-        # Предсказание
-        predictions = {}
-        for target_name, model in model_data['models'].items():
-            pred = model.predict(X_scaled)[0]
-            predictions[target_name] = float(pred)
-        
+        predictions = predict_targets(trainer, model_data, patient_dict)
         return predictions
-        
-    except Exception as e:
-        logger.error(f"Ошибка предсказания: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка предсказания: {str(e)}")
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        logger.exception("Несовместимая форма входных данных при предсказании")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Несовместимые входные данные: {exc}",
+        )
+    except Exception as exc:
+        logger.exception("Внутренняя ошибка при выполнении предсказания")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Внутренняя ошибка предсказания: {exc}",
+        )
 
 @app.on_event("startup")
 async def startup_event():
@@ -189,87 +211,112 @@ async def get_model_info():
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict(request: PredictRequest):
-    """Предсказание смещения почек"""
+    """Предсказание смещения почек."""
     try:
-        # Выполнение предсказания
         predictions = predict_displacement(request.patient_data)
-        
-        # Расчет доверительных интервалов (упрощенный)
-        confidence = {
-            target: min(0.95, max(0.5, 1.0 - abs(pred) / 50.0))
-            for target, pred in predictions.items()
-        }
-        
-        return PredictResponse(
-            success=True,
-            predictions=predictions,
-            metadata={
-                "model_version": "optimized_adaptive_ensemble_v1.0",
-                "features_used": len(feature_names),
-                "prediction_confidence": confidence,
-                "timestamp": datetime.now().isoformat()
-            }
-        )
-        
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Неожиданная ошибка: {e}")
-        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера: {str(e)}")
+    except Exception as exc:
+        logger.exception("Неожиданная ошибка в эндпоинте /predict")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Внутренняя ошибка сервера: {exc}",
+        )
+
+    confidence = {
+        target: min(0.95, max(0.5, 1.0 - abs(pred) / 50.0))
+        for target, pred in predictions.items()
+    }
+
+    return PredictResponse(
+        success=True,
+        predictions=predictions,
+        metadata={
+            "model_version": "optimized_adaptive_ensemble_v1.0",
+            "features_used": len(feature_names),
+            "prediction_confidence": confidence,
+            "timestamp": datetime.now().isoformat(),
+        },
+    )
 
 @app.post("/predict_batch")
 async def predict_batch(request: BatchPredictRequest):
-    """Пакетное предсказание для нескольких пациентов"""
-    try:
-        results = []
-        successful_predictions = 0
-        
-        for patient_data in request.patients:
-            try:
-                patient_id = patient_data.get("patient_id", f"patient_{len(results)+1}")
-                patient_info = patient_data["patient_data"]
-                
-                # Выполнение предсказания
-                predictions = predict_displacement(PatientData(**patient_info))
-                
-                results.append({
-                    "patient_id": patient_id,
-                    "predictions": predictions
-                })
-                successful_predictions += 1
-                
-            except Exception as e:
-                logger.error(f"Ошибка предсказания для пациента {patient_data.get('patient_id', 'unknown')}: {e}")
-                results.append({
-                    "patient_id": patient_data.get("patient_id", f"patient_{len(results)+1}"),
-                    "error": str(e)
-                })
-        
-        return {
-            "success": True,
-            "results": results,
-            "metadata": {
-                "total_patients": len(request.patients),
-                "successful_predictions": successful_predictions,
-                "failed_predictions": len(request.patients) - successful_predictions,
-                "model_version": "optimized_adaptive_ensemble_v1.0",
-                "timestamp": datetime.now().isoformat()
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"Ошибка пакетного предсказания: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка пакетного предсказания: {str(e)}")
+    """Пакетное предсказание для нескольких пациентов.
+
+    Поведение HTTP-кодов:
+      - 200: хотя бы один прогноз выполнен; в теле ответа `success`
+        отражает фактический результат (`True` тогда и только тогда, когда
+        ВСЕ пациенты обработаны без ошибок);
+      - 400: пустой список пациентов или невалидный формат запроса;
+      - 503: модель не загружена;
+      - 500: непредвиденная серверная ошибка.
+    """
+    if model_data is None or feature_names is None:
+        raise HTTPException(status_code=503, detail="Модель не загружена")
+    if not request.patients:
+        raise HTTPException(status_code=400, detail="Список пациентов пуст")
+
+    results: List[Dict[str, Any]] = []
+    successful_predictions = 0
+
+    for idx, entry in enumerate(request.patients, start=1):
+        patient_id = entry.patient_id or f"patient_{idx}"
+        try:
+            predictions = predict_displacement(entry.patient_data)
+            results.append({"patient_id": patient_id, "predictions": predictions})
+            successful_predictions += 1
+        except HTTPException as http_exc:
+            logger.warning(
+                "Ошибка предсказания для пациента %s: %s",
+                patient_id,
+                http_exc.detail,
+            )
+            results.append({
+                "patient_id": patient_id,
+                "error": http_exc.detail,
+                "status_code": http_exc.status_code,
+            })
+        except Exception as exc:
+            logger.exception("Неожиданная ошибка для пациента %s", patient_id)
+            results.append({
+                "patient_id": patient_id,
+                "error": str(exc),
+                "status_code": 500,
+            })
+
+    total = len(request.patients)
+    return {
+        "success": successful_predictions == total,
+        "results": results,
+        "metadata": {
+            "total_patients": total,
+            "successful_predictions": successful_predictions,
+            "failed_predictions": total - successful_predictions,
+            "model_version": "optimized_adaptive_ensemble_v1.0",
+            "timestamp": datetime.now().isoformat(),
+        },
+    }
 
 @app.get("/")
 async def root():
-    """Корневой эндпоинт с информацией"""
+    """Корневой эндпоинт с информацией о canonical predict-API."""
     return {
-        "message": "Kidney Displacement Prediction API",
+        "message": "Kidney Displacement Prediction API (canonical)",
         "version": "1.0.0",
+        "service_role": "kidney_displacement_prediction",
         "docs": "/docs",
         "health": "/health",
-        "model_info": "/model_info"
+        "model_info": "/model_info",
+        "endpoints": {
+            "predict": "POST /predict",
+            "predict_batch": "POST /predict_batch",
+        },
+        "deprecated_alternatives": {
+            "flask_legacy": "models/phase1/api_kidney_predictor.py (do not use for new integrations)",
+        },
+        "related_not_canonical": {
+            "ar_navigation": "src/api/api_server.py (different domain: AR + sensors, not displacement predict)",
+        },
     }
 
 if __name__ == "__main__":

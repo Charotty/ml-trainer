@@ -7,6 +7,7 @@ Integrates: DICOMS + Vybor + KiTS19
 
 import pandas as pd
 import numpy as np
+from sklearn.base import clone
 from sklearn.ensemble import VotingRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Lasso, Ridge
@@ -25,6 +26,14 @@ from pathlib import Path
 
 # Добавляем путь к корневой директории для импорта наших модулей
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+from src.features.phase1_schema import (
+    BASE_FEATURES,
+    CROSS_FEATURES,
+    ENGINEERED_FEATURES,
+    TARGET_NAMES,
+    encode_patient_position,
+    normalize_dataframe,
+)
 warnings.filterwarnings('ignore')
 
 class AdaptiveEnsembleTrainer:
@@ -38,69 +47,11 @@ class AdaptiveEnsembleTrainer:
         self.X_train = None  # Для confidence estimator
         self.cv_splitter = KFold(n_splits=5, shuffle=True, random_state=42)  # Воспроизводимый CV
         
-        # Расширенный список признаков с учетом всех источников + критически важные
-        # Адаптировано под реальные данные в train.csv
-        self.required_features = [
-            # Базовые геометрические признаки (доступные в данных)
-            'kidney_left_center_x_rel', 'kidney_left_center_y_rel', 'kidney_left_center_z_rel',
-            'kidney_right_center_x_rel', 'kidney_right_center_y_rel', 'kidney_right_center_z_rel',
-            
-            # Размеры почек
-            'kidney_left_length_mm', 'kidney_left_volume_cm3',
-            'kidney_right_length_mm', 'kidney_right_volume_cm3',
-            
-            # Геометрия тела
-            'body_width_mm', 'body_depth_mm', 'body_area_mm2',
-            
-            # Относительные расстояния
-            'kidney_left_to_spine_distance', 'kidney_right_to_spine_distance',
-            'kidney_left_to_body_center_distance', 'kidney_right_to_body_center_distance',
-            
-            # Центры (только для расчета относительных признаков)
-            'spine_center_x', 'spine_center_y', 'spine_center_z',
-            'body_com_x', 'body_com_y', 'body_com_z',
-        ]
-        
-        # Инженерные признаки (будут добавлены в prepare_training_data)
-        self.engineered_features = [
-            'body_ratio',  # body_width / body_depth
-            'kidney_distance_lr',  # расстояние между почками
-            'kidney_left_volume_norm',  # kidney_left_volume / body_width
-            'kidney_right_volume_norm',  # kidney_right_volume / body_width
-            'kidney_left_length_norm',  # kidney_left_length / body_width
-            'kidney_right_length_norm',  # kidney_right_length / body_width
-            'volume_asymmetry',  # left_volume - right_volume
-            'length_asymmetry',  # left_length - right_length
-            'spine_distance_asymmetry',  # left_to_spine - right_to_spine
-            'body_center_asymmetry',  # left_to_body - right_to_body
-            'kidney_left_to_spine_ratio',  # left_to_spine / body_width
-            'kidney_right_to_spine_ratio',  # right_to_spine / body_width
-            'patient_position_encoded',  # будет создан из данных
-        ]
-        
-        # Дополнительные cross-features для улучшения производительности
-        self.cross_features = [
-            'body_volume_estimated',  # body_width * body_depth * средняя высота почки
-            'kidney_left_density_ratio',  # volume / length
-            'kidney_right_density_ratio',  # volume / length
-            'spine_to_body_ratio_x',  # spine_center_x / body_width
-            'spine_to_body_ratio_y',  # spine_center_y / body_depth
-            'body_com_to_spine_distance',  # расстояние между центром масс и позвоночником
-            'kidney_left_spine_interaction',  # left_to_spine * left_volume
-            'kidney_right_spine_interaction',  # right_to_spine * right_volume
-            'body_size_index',  # sqrt(width^2 + depth^2)
-            'kidney_position_index_left',  # sqrt(x_rel^2 + y_rel^2 + z_rel^2)
-            'kidney_position_index_right',  # sqrt(x_rel^2 + y_rel^2 + z_rel^2)
-            'volume_to_area_ratio_left',  # left_volume / body_area
-            'volume_to_area_ratio_right',  # right_volume / body_area
-            'relative_volume_sum',  # (left_volume + right_volume) / body_width
-            'kidney_separation_angle',  # угол между почками относительно позвоночника
-        ]
-
-        self.target_columns = [
-            'kidney_left_delta_x', 'kidney_left_delta_y', 'kidney_left_delta_z',
-            'kidney_right_delta_x', 'kidney_right_delta_y', 'kidney_right_delta_z'
-        ]
+        # Canonical schema: config/phase1_feature_schema.yaml + src/features/phase1_schema.py
+        self.required_features = list(BASE_FEATURES)
+        self.engineered_features = list(ENGINEERED_FEATURES)
+        self.cross_features = list(CROSS_FEATURES)
+        self.target_columns = list(TARGET_NAMES)
         
         # Best models per target based on comparison results
         self.best_models = {
@@ -153,181 +104,288 @@ class AdaptiveEnsembleTrainer:
         }
     
     def load_integrated_data(self):
-        """Load integrated data from all sources"""
+        """Load integrated train/validation splits from disk.
+
+        Returns (combined_df, train_df, val_df). The ``combined_df`` is
+        kept ONLY for backwards compatibility — see ``prepare_training_data``
+        warning. New callers must use ``prepare_training_data_split`` which
+        accepts ``train_df`` and ``val_df`` separately.
+        """
         print("Loading integrated datasets from all sources...")
-        
-        # Используем наши интегрированные данные
         try:
             train_df = pd.read_csv('data/processed/train.csv')
             val_df = pd.read_csv('data/processed/validation.csv')
-            
             print(f"Integrated Train dataset: {len(train_df)} cases")
             print(f"Integrated Validation dataset: {len(val_df)} cases")
-            
-            # Объединяем для обучения
             combined_df = pd.concat([train_df, val_df], ignore_index=True)
-            print(f"Combined dataset: {len(combined_df)} cases")
-            
+            print(f"Combined dataset (legacy view): {len(combined_df)} cases")
             return combined_df, train_df, val_df
-            
         except FileNotFoundError:
             print("Integrated data files not found. Please run data integration first.")
             print("Run: python src/models/data_integration_fix.py")
             return None, None, None
     
         
-    def prepare_training_data(self, df):
-        """Prepare features and targets for training with engineered features"""
+    def _build_feature_matrix(self, df):
+        """Apply feature engineering and return (X, y, all_feature_cols, target_cols).
+
+        Shared helper used by both legacy and leak-safe prepare paths. Returns
+        X as ``np.ndarray`` with NaN preserved — imputation happens later
+        (after train/val split) to avoid information leakage.
+        """
+        df = normalize_dataframe(df)
         target_cols = [col for col in self.target_columns if col in df.columns]
-        
-        # Проверяем наличие базовых признаков
+
         missing_base_features = [col for col in self.required_features if col not in df.columns]
         if missing_base_features:
-            print(f"❌ CRITICAL: Missing base features: {missing_base_features}")
-            print("This will cause silent feature dropping and poor performance!")
-            # Не продолжаем с отсутствующими критическими признаками
+            print(f"WARNING: Missing base features: {missing_base_features}")
             available_base_features = [col for col in self.required_features if col in df.columns]
             if len(available_base_features) < len(self.required_features) * 0.8:
                 print("Too many missing features. Cannot proceed.")
                 return None, None, None, None
-        
+
         if len(target_cols) == 0:
             print("No target variables found in dataset")
             return None, None, None, None
-        
-        # Создаем инженерные признаки
+
         df_enhanced = self._create_engineered_features(df.copy())
-        
-        # Создаем cross-features
         df_enhanced = self._create_cross_features(df_enhanced)
-        
-        # Объединяем базовые, инженерные и cross-features
+
         base_feature_cols = [col for col in self.required_features if col in df_enhanced.columns]
         engineered_feature_cols = [col for col in self.engineered_features if col in df_enhanced.columns]
         cross_feature_cols = [col for col in self.cross_features if col in df_enhanced.columns]
-        
         all_feature_cols = base_feature_cols + engineered_feature_cols + cross_feature_cols
-        
-        print(f"✅ Base features: {len(base_feature_cols)}")
-        print(f"✅ Engineered features: {len(engineered_feature_cols)}")
-        print(f"✅ Cross features: {len(cross_feature_cols)}")
-        print(f"✅ Total features: {len(all_feature_cols)}")
-        
-        # Разделяем признаки и цели
-        X = df_enhanced[all_feature_cols].values
-        y = df_enhanced[target_cols].values
-        
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
+
+        X = df_enhanced[all_feature_cols].astype(float).values
+        y = df_enhanced[target_cols].astype(float).values
+        return X, y, all_feature_cols, target_cols
+
+    def build_inference_matrix(self, df):
+        """Apply train-time feature engineering to an arbitrary inference df.
+
+        Returns an ``np.ndarray`` of shape ``(n_rows, len(self.feature_names))``
+        aligned to the columns recorded at training time, with NaN preserved.
+        Use this from inference code instead of re-implementing the pipeline.
+        """
+        if not self.feature_names:
+            raise RuntimeError(
+                "feature_names is empty. Train (or load) the model before "
+                "calling build_inference_matrix()."
+            )
+        df = normalize_dataframe(df)
+        df_enhanced = self._create_engineered_features(df.copy())
+        df_enhanced = self._create_cross_features(df_enhanced)
+        for col in self.feature_names:
+            if col not in df_enhanced.columns:
+                df_enhanced[col] = np.nan
+        X = df_enhanced[self.feature_names].astype(float).values
+        return X
+
+    def prepare_training_data(self, df):
+        """[Legacy / leakage-risk] Готовит данные из ОДНОГО объединённого df.
+
+        ВНИМАНИЕ: внутри делает ``train_test_split`` поверх входа, что
+        приводит к утечке, если ``df`` уже содержит склейку train+validation.
+        Метод сохранён только для обратной совместимости. Для нового кода
+        используйте ``prepare_training_data_split(train_df, val_df)``.
+        """
+        import warnings as _warnings
+        _warnings.warn(
+            "prepare_training_data(df) introduces train/val leakage when df is "
+            "the concatenation of train and validation. Use "
+            "prepare_training_data_split(train_df, val_df) instead.",
+            DeprecationWarning,
+            stacklevel=2,
         )
-        
-        # Scale features
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_test_scaled = self.scaler.transform(X_test)
-        
+
+        out = self._build_feature_matrix(df)
+        if out[0] is None:
+            return None, None, None, None
+        X, y, all_feature_cols, target_cols = out
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42,
+        )
+
+        # Imputer fitted on train only, then applied to test — consistent
+        # with the inference path that will use the same imputer.
+        X_train_imp = self.imputer.fit_transform(X_train)
+        X_test_imp = self.imputer.transform(X_test)
+        X_train_scaled = self.scaler.fit_transform(X_train_imp)
+        X_test_scaled = self.scaler.transform(X_test_imp)
+
         self.feature_names = all_feature_cols
         self.target_names = target_cols
-        self.X_train = X_train_scaled  # Сохраняем для confidence estimator
-        
+        self.X_train = X_train_scaled
+
         print(f"Train: {X_train_scaled.shape}, Test: {X_test_scaled.shape}")
-        
         return X_train_scaled, X_test_scaled, y_train, y_test
+
+    def prepare_training_data_split(self, train_df, val_df):
+        """Готовит данные БЕЗ утечки train/val статистики.
+
+        Контракт:
+          - ``train_df`` и ``val_df`` уже разделены на диске и НЕ объединяются.
+          - feature engineering применяется к каждому датафрейму независимо.
+          - ``StandardScaler.fit`` происходит ТОЛЬКО на train, далее
+            ``transform`` к val.
+          - Возвращает ``(X_train, X_val, y_train, y_val)``.
+
+        Это leakage-safe замена ``prepare_training_data``.
+        """
+        out_train = self._build_feature_matrix(train_df)
+        if out_train[0] is None:
+            return None, None, None, None
+        X_train_raw, y_train, feature_cols_train, target_cols_train = out_train
+
+        out_val = self._build_feature_matrix(val_df)
+        if out_val[0] is None:
+            return None, None, None, None
+        X_val_raw, y_val, feature_cols_val, target_cols_val = out_val
+
+        if feature_cols_train != feature_cols_val:
+            common = [c for c in feature_cols_train if c in feature_cols_val]
+            print(
+                "WARNING: train/val feature sets diverged after engineering "
+                f"({len(feature_cols_train)} vs {len(feature_cols_val)}); using "
+                f"{len(common)} common columns."
+            )
+            train_indices = [feature_cols_train.index(c) for c in common]
+            val_indices = [feature_cols_val.index(c) for c in common]
+            X_train_raw = X_train_raw[:, train_indices]
+            X_val_raw = X_val_raw[:, val_indices]
+            feature_cols = common
+        else:
+            feature_cols = feature_cols_train
+
+        if target_cols_train != target_cols_val:
+            print(
+                "WARNING: train/val target columns differ. "
+                f"train={target_cols_train}, val={target_cols_val}"
+            )
+        target_cols = target_cols_train
+
+        # Imputer is fit ONLY on train. Same fitted imputer is then applied
+        # to val and persisted in save_model(). At inference time the API
+        # is required to apply the same imputer before the scaler — see
+        # ``predict_displacement`` in src/api/kidney_displacement_api.py.
+        X_train_imp = self.imputer.fit_transform(X_train_raw)
+        X_val_imp = self.imputer.transform(X_val_raw)
+        X_train_scaled = self.scaler.fit_transform(X_train_imp)
+        X_val_scaled = self.scaler.transform(X_val_imp)
+
+        self.feature_names = feature_cols
+        self.target_names = target_cols
+        self.X_train = X_train_scaled
+
+        print(f"Base features: {len([c for c in self.required_features if c in feature_cols])}")
+        print(f"Engineered features: {len([c for c in self.engineered_features if c in feature_cols])}")
+        print(f"Cross features: {len([c for c in self.cross_features if c in feature_cols])}")
+        print(f"Total features: {len(feature_cols)}")
+        print(f"Train: {X_train_scaled.shape}, Val: {X_val_scaled.shape}")
+        return X_train_scaled, X_val_scaled, y_train, y_val
     
     def _create_engineered_features(self, df):
         """Create engineered features from base features"""
-        print("\n🔧 Creating engineered features...")
+        print("\n[FE] Creating engineered features...")
         
         # 1. Body ratio
         if 'body_width_mm' in df.columns and 'body_depth_mm' in df.columns:
             df['body_ratio'] = df['body_width_mm'] / df['body_depth_mm']
-            print("  ✅ body_ratio created")
+            print("  [OK] body_ratio created")
         
         # 2. Расстояние между почками (используем center_x_rel)
         if 'kidney_left_center_x_rel' in df.columns and 'kidney_right_center_x_rel' in df.columns:
             df['kidney_distance_lr'] = np.abs(df['kidney_left_center_x_rel'] - df['kidney_right_center_x_rel'])
-            print("  ✅ kidney_distance_lr created")
+            print("  [OK] kidney_distance_lr created")
         
         # 3. Нормализованные размеры почек
         if 'kidney_left_volume_cm3' in df.columns and 'body_width_mm' in df.columns:
             df['kidney_left_volume_norm'] = df['kidney_left_volume_cm3'] / df['body_width_mm']
-            print("  ✅ kidney_left_volume_norm created")
+            print("  [OK] kidney_left_volume_norm created")
             
         if 'kidney_right_volume_cm3' in df.columns and 'body_width_mm' in df.columns:
             df['kidney_right_volume_norm'] = df['kidney_right_volume_cm3'] / df['body_width_mm']
-            print("  ✅ kidney_right_volume_norm created")
+            print("  [OK] kidney_right_volume_norm created")
         
         if 'kidney_left_length_mm' in df.columns and 'body_width_mm' in df.columns:
             df['kidney_left_length_norm'] = df['kidney_left_length_mm'] / df['body_width_mm']
-            print("  ✅ kidney_left_length_norm created")
+            print("  [OK] kidney_left_length_norm created")
             
         if 'kidney_right_length_mm' in df.columns and 'body_width_mm' in df.columns:
             df['kidney_right_length_norm'] = df['kidney_right_length_mm'] / df['body_width_mm']
-            print("  ✅ kidney_right_length_norm created")
+            print("  [OK] kidney_right_length_norm created")
         
         # 4. Признаки асимметрии
         if 'kidney_left_volume_cm3' in df.columns and 'kidney_right_volume_cm3' in df.columns:
             df['volume_asymmetry'] = df['kidney_left_volume_cm3'] - df['kidney_right_volume_cm3']
-            print("  ✅ volume_asymmetry created")
+            print("  [OK] volume_asymmetry created")
         
         if 'kidney_left_length_mm' in df.columns and 'kidney_right_length_mm' in df.columns:
             df['length_asymmetry'] = df['kidney_left_length_mm'] - df['kidney_right_length_mm']
-            print("  ✅ length_asymmetry created")
+            print("  [OK] length_asymmetry created")
         
         if 'kidney_left_to_spine_distance' in df.columns and 'kidney_right_to_spine_distance' in df.columns:
             df['spine_distance_asymmetry'] = df['kidney_left_to_spine_distance'] - df['kidney_right_to_spine_distance']
-            print("  ✅ spine_distance_asymmetry created")
+            print("  [OK] spine_distance_asymmetry created")
         
         if 'kidney_left_to_body_center_distance' in df.columns and 'kidney_right_to_body_center_distance' in df.columns:
             df['body_center_asymmetry'] = df['kidney_left_to_body_center_distance'] - df['kidney_right_to_body_center_distance']
-            print("  ✅ body_center_asymmetry created")
+            print("  [OK] body_center_asymmetry created")
         
         # 5. Нормализованные расстояния до позвоночника
         if 'kidney_left_to_spine_distance' in df.columns and 'body_width_mm' in df.columns:
             df['kidney_left_to_spine_ratio'] = df['kidney_left_to_spine_distance'] / df['body_width_mm']
-            print("  ✅ kidney_left_to_spine_ratio created")
+            print("  [OK] kidney_left_to_spine_ratio created")
         
         if 'kidney_right_to_spine_distance' in df.columns and 'body_width_mm' in df.columns:
             df['kidney_right_to_spine_ratio'] = df['kidney_right_to_spine_distance'] / df['body_width_mm']
-            print("  ✅ kidney_right_to_spine_ratio created")
+            print("  [OK] kidney_right_to_spine_ratio created")
         
-        # 6. Добавляем patient_position_encoded
-        if 'patient_position_encoded' not in df.columns:
-            # Проверяем есть ли scan_position в исходных данных
-            # Если нет, используем значение по умолчанию (supine=1)
-            df['patient_position_encoded'] = 1  # Все пациенты в положении supine по умолчанию
-            print("  ✅ patient_position_encoded set to default (supine=1)")
+        # 6. patient_position_encoded (from scan_position / patient_position or default)
+        if 'patient_position_encoded' not in df.columns or df['patient_position_encoded'].isna().all():
+            pos_col = None
+            for candidate in ('scan_position', 'patient_position'):
+                if candidate in df.columns:
+                    pos_col = candidate
+                    break
+            if pos_col is not None:
+                df['patient_position_encoded'] = df[pos_col].map(encode_patient_position)
+                print(f"  [OK] patient_position_encoded from {pos_col}")
+            else:
+                df['patient_position_encoded'] = 1
+                print("  [OK] patient_position_encoded set to default (supine=1)")
         
-        print(f"🔧 Engineered features creation completed. New shape: {df.shape}")
+        print(f"[FE] Engineered features creation completed. New shape: {df.shape}")
         return df
     
     def _create_cross_features(self, df):
         """Create advanced cross-features for better performance"""
-        print("\n🔧 Creating cross-features...")
+        print("\n[FE] Creating cross-features...")
         
         # 1. Body volume estimation
         if 'body_width_mm' in df.columns and 'body_depth_mm' in df.columns and 'kidney_left_length_mm' in df.columns:
             avg_kidney_height = (df['kidney_left_length_mm'] + df.get('kidney_right_length_mm', df['kidney_left_length_mm'])) / 2
             df['body_volume_estimated'] = df['body_width_mm'] * df['body_depth_mm'] * avg_kidney_height / 1000  # в см³
-            print("  ✅ body_volume_estimated created")
+            print("  [OK] body_volume_estimated created")
         
         # 2. Kidney density ratios
         if 'kidney_left_volume_cm3' in df.columns and 'kidney_left_length_mm' in df.columns:
             df['kidney_left_density_ratio'] = df['kidney_left_volume_cm3'] / df['kidney_left_length_mm']
-            print("  ✅ kidney_left_density_ratio created")
+            print("  [OK] kidney_left_density_ratio created")
             
         if 'kidney_right_volume_cm3' in df.columns and 'kidney_right_length_mm' in df.columns:
             df['kidney_right_density_ratio'] = df['kidney_right_volume_cm3'] / df['kidney_right_length_mm']
-            print("  ✅ kidney_right_density_ratio created")
+            print("  [OK] kidney_right_density_ratio created")
         
         # 3. Spine to body ratios
         if 'spine_center_x' in df.columns and 'body_width_mm' in df.columns:
             df['spine_to_body_ratio_x'] = df['spine_center_x'] / df['body_width_mm']
-            print("  ✅ spine_to_body_ratio_x created")
+            print("  [OK] spine_to_body_ratio_x created")
             
         if 'spine_center_y' in df.columns and 'body_depth_mm' in df.columns:
             df['spine_to_body_ratio_y'] = df['spine_center_y'] / df['body_depth_mm']
-            print("  ✅ spine_to_body_ratio_y created")
+            print("  [OK] spine_to_body_ratio_y created")
         
         # 4. Body COM to spine distance
         if all(col in df.columns for col in ['body_com_x', 'body_com_y', 'spine_center_x', 'spine_center_y']):
@@ -335,21 +393,21 @@ class AdaptiveEnsembleTrainer:
                 (df['body_com_x'] - df['spine_center_x'])**2 + 
                 (df['body_com_y'] - df['spine_center_y'])**2
             )
-            print("  ✅ body_com_to_spine_distance created")
+            print("  [OK] body_com_to_spine_distance created")
         
         # 5. Kidney-spine interactions
         if 'kidney_left_to_spine_distance' in df.columns and 'kidney_left_volume_cm3' in df.columns:
             df['kidney_left_spine_interaction'] = df['kidney_left_to_spine_distance'] * df['kidney_left_volume_cm3']
-            print("  ✅ kidney_left_spine_interaction created")
+            print("  [OK] kidney_left_spine_interaction created")
             
         if 'kidney_right_to_spine_distance' in df.columns and 'kidney_right_volume_cm3' in df.columns:
             df['kidney_right_spine_interaction'] = df['kidney_right_to_spine_distance'] * df['kidney_right_volume_cm3']
-            print("  ✅ kidney_right_spine_interaction created")
+            print("  [OK] kidney_right_spine_interaction created")
         
         # 6. Body size index
         if 'body_width_mm' in df.columns and 'body_depth_mm' in df.columns:
             df['body_size_index'] = np.sqrt(df['body_width_mm']**2 + df['body_depth_mm']**2)
-            print("  ✅ body_size_index created")
+            print("  [OK] body_size_index created")
         
         # 7. Kidney position indices
         if all(col in df.columns for col in ['kidney_left_center_x_rel', 'kidney_left_center_y_rel', 'kidney_left_center_z_rel']):
@@ -358,7 +416,7 @@ class AdaptiveEnsembleTrainer:
                 df['kidney_left_center_y_rel']**2 + 
                 df['kidney_left_center_z_rel']**2
             )
-            print("  ✅ kidney_position_index_left created")
+            print("  [OK] kidney_position_index_left created")
             
         if all(col in df.columns for col in ['kidney_right_center_x_rel', 'kidney_right_center_y_rel', 'kidney_right_center_z_rel']):
             df['kidney_position_index_right'] = np.sqrt(
@@ -366,21 +424,21 @@ class AdaptiveEnsembleTrainer:
                 df['kidney_right_center_y_rel']**2 + 
                 df['kidney_right_center_z_rel']**2
             )
-            print("  ✅ kidney_position_index_right created")
+            print("  [OK] kidney_position_index_right created")
         
         # 8. Volume to area ratios
         if 'kidney_left_volume_cm3' in df.columns and 'body_area_mm2' in df.columns:
             df['volume_to_area_ratio_left'] = df['kidney_left_volume_cm3'] / (df['body_area_mm2'] / 100)  # переводим в см²
-            print("  ✅ volume_to_area_ratio_left created")
+            print("  [OK] volume_to_area_ratio_left created")
             
         if 'kidney_right_volume_cm3' in df.columns and 'body_area_mm2' in df.columns:
             df['volume_to_area_ratio_right'] = df['kidney_right_volume_cm3'] / (df['body_area_mm2'] / 100)
-            print("  ✅ volume_to_area_ratio_right created")
+            print("  [OK] volume_to_area_ratio_right created")
         
         # 9. Relative volume sum
         if 'kidney_left_volume_cm3' in df.columns and 'kidney_right_volume_cm3' in df.columns and 'body_width_mm' in df.columns:
             df['relative_volume_sum'] = (df['kidney_left_volume_cm3'] + df['kidney_right_volume_cm3']) / df['body_width_mm']
-            print("  ✅ relative_volume_sum created")
+            print("  [OK] relative_volume_sum created")
         
         # 10. Kidney separation angle (упрощенный)
         if all(col in df.columns for col in ['kidney_left_center_x_rel', 'kidney_right_center_x_rel', 'kidney_left_center_y_rel', 'kidney_right_center_y_rel']):
@@ -400,9 +458,9 @@ class AdaptiveEnsembleTrainer:
                 0
             )
             df['kidney_separation_angle'] = np.arccos(np.clip(cos_angle, -1, 1)) * 180 / np.pi  # в градусах
-            print("  ✅ kidney_separation_angle created")
+            print("  [OK] kidney_separation_angle created")
         
-        print(f"🔧 Cross-features creation completed. New shape: {df.shape}")
+        print(f"[FE] Cross-features creation completed. New shape: {df.shape}")
         return df
     
     def load_base_models(self):
@@ -457,7 +515,7 @@ class AdaptiveEnsembleTrainer:
     
     def optimize_ensemble_weights(self, models, X_train, y_train, X_val, y_val, target_name):
         """Оптимизация весов ансамбля с помощью scipy.optimize"""
-        print(f"\n🔧 Optimizing ensemble weights for {target_name}...")
+        print(f"\n[FE] Optimizing ensemble weights for {target_name}...")
         
         # Получаем предсказания каждой модели на валидационном наборе
         model_predictions = {}
@@ -504,7 +562,7 @@ class AdaptiveEnsembleTrainer:
         for i, model_name in enumerate(models.keys()):
             optimized_weights[model_name] = optimal_weights[i]
         
-        print(f"  ✅ Optimized weights: {optimized_weights}")
+        print(f"  [OK] Optimized weights: {optimized_weights}")
         
         # Сравниваем с равными весами
         equal_weights = {name: 1.0/len(models) for name in models.keys()}
@@ -520,67 +578,83 @@ class AdaptiveEnsembleTrainer:
         optimized_mae = mean_absolute_error(y_val, optimized_pred)
         
         improvement = ((equal_mae - optimized_mae) / equal_mae) * 100
-        print(f"  📈 Improvement: {improvement:.1f}% (MAE: {equal_mae:.3f} → {optimized_mae:.3f})")
+        print(f"  Improvement: {improvement:.1f}% (MAE: {equal_mae:.3f} -> {optimized_mae:.3f})")
         
         return optimized_weights
     
     def _copy_model(self, model):
-        """Создает копию модели с теми же параметрами"""
-        if hasattr(model, 'get_params'):
-            return type(model)(**model.get_params())
-        else:
-            # Fallback для простых моделей
+        """Создает копию модели с теми же параметрами (без обученного состояния).
+
+        Делегирует ``sklearn.base.clone`` для корректной обработки вложенных
+        параметров (пайплайны/нестед-параметры в RandomForest и т.п.).
+        """
+        try:
+            return clone(model)
+        except Exception:
+            if hasattr(model, "get_params"):
+                return type(model)(**model.get_params())
             return type(model)()
     
     def create_optimized_voting_ensemble(self, models, target_name, optimized_weights):
-        """Create voting ensemble with optimized weights"""
-        estimators = [(name, models[name]) for name in models.keys()]
+        """Create voting ensemble with optimized weights.
+
+        Estimators cloned to keep cross-target training fully isolated.
+        """
+        estimators = [(name, clone(models[name])) for name in models.keys()]
         weights = [optimized_weights[name] for name in models.keys()]
-        
+
         return VotingRegressor(
             estimators=estimators,
             weights=weights,
-            n_jobs=1
+            n_jobs=1,
         )
-    
+
     def create_adaptive_voting_ensemble(self, models, target_name):
-        """Create adaptive voting ensemble for specific target"""
+        """Create adaptive voting ensemble for specific target."""
         target_weights = self.adaptive_weights[target_name]
-        
-        # Create estimators with weights
+
         estimators = []
         weights = []
-        
+
         for model_name, weight in target_weights.items():
             if model_name in models:
-                estimators.append((model_name, models[model_name]))
+                estimators.append((model_name, clone(models[model_name])))
                 weights.append(weight)
-        
+
         return VotingRegressor(
             estimators=estimators,
             weights=weights,
-            n_jobs=1  # Отключаем параллелизм для детерминированности
+            n_jobs=1,
         )
-    
+
     def create_standard_voting_ensemble(self, models):
-        """Create standard voting ensemble (all models equal weight)"""
-        estimators = [(name, models[name]) for name in models.keys()]
-        
+        """Create standard voting ensemble (all models equal weight)."""
+        estimators = [(name, clone(models[name])) for name in models.keys()]
+
         return VotingRegressor(
             estimators=estimators,
-            weights=None,  # Equal weights
-            n_jobs=1  # Отключаем параллелизм для детерминированности
+            weights=None,
+            n_jobs=1,
         )
-    
+
     def evaluate_model_cv(self, model, X_train, y_train, model_name):
-        """Evaluate model using cross-validation"""
-        cv_scores = cross_val_score(model, X_train, y_train, 
-                                  cv=self.cv_splitter,
-                                  scoring='neg_mean_absolute_error')
+        """Evaluate model using cross-validation on a cloned estimator.
+
+        `sklearn.cross_val_score` internally clones the estimator, but we
+        clone here too so the caller's instance is provably never mutated
+        even if `cross_val_score` behavior changes in future sklearn.
+        """
+        cv_scores = cross_val_score(
+            clone(model),
+            X_train,
+            y_train,
+            cv=self.cv_splitter,
+            scoring='neg_mean_absolute_error',
+        )
         cv_mae = -cv_scores.mean()
         cv_std = cv_scores.std()
-        
-        print(f"  {model_name} CV MAE: {cv_mae:.3f} ± {cv_std:.3f}")
+
+        print(f"  {model_name} CV MAE: {cv_mae:.3f} +/- {cv_std:.3f}")
         return cv_mae, cv_std
     
     def train_and_evaluate_adaptive_ensembles(self, X_train, X_test, y_train, y_test):
@@ -719,11 +793,11 @@ class AdaptiveEnsembleTrainer:
                 'Improvement_Optimized_vs_Best': ((self._get_best_single_mae(target_name) - optimized_mae) / self._get_best_single_mae(target_name)) * 100 if self._get_best_single_mae(target_name) is not None else 0.0
             }
             
-            print(f"  Optimized Ensemble - MAE: {optimized_mae:.3f} mm, R²: {optimized_r2:.3f}")
+            print(f"  Optimized Ensemble - MAE: {optimized_mae:.3f} mm, R2: {optimized_r2:.3f}")
             print(f"    <5mm accuracy: {optimized_error_5mm:.1f}%, <10mm accuracy: {optimized_error_10mm:.1f}%")
-            print(f"  Adaptive Ensemble - MAE: {adaptive_mae:.3f} mm, R²: {adaptive_r2:.3f}")
+            print(f"  Adaptive Ensemble - MAE: {adaptive_mae:.3f} mm, R2: {adaptive_r2:.3f}")
             print(f"    <5mm accuracy: {adaptive_error_5mm:.1f}%, <10mm accuracy: {adaptive_error_10mm:.1f}%")
-            print(f"  Standard Ensemble - MAE: {standard_mae:.3f} mm, R²: {standard_r2:.3f}")
+            print(f"  Standard Ensemble - MAE: {standard_mae:.3f} mm, R2: {standard_r2:.3f}")
             print(f"    <5mm accuracy: {standard_error_5mm:.1f}%, <10mm accuracy: {standard_error_10mm:.1f}%")
             print(f"  Improvement over standard: {((standard_mae - optimized_mae) / standard_mae) * 100:.1f}%")
             print(f"  Improvement over adaptive: {((adaptive_mae - optimized_mae) / adaptive_mae) * 100:.1f}%")
@@ -776,21 +850,21 @@ class AdaptiveEnsembleTrainer:
         print(f"Optimized Voting Ensemble:")
         print(f"  Average MAE: {optimized_mae:.3f} mm")
         print(f"  Average RMSE: {optimized_rmse:.3f} mm")
-        print(f"  Average R²: {optimized_r2:.3f}")
+        print(f"  Average R2: {optimized_r2:.3f}")
         print(f"  Average <5mm accuracy: {optimized_5mm:.1f}%")
         print(f"  Average <10mm accuracy: {optimized_10mm:.1f}%")
         
         print(f"\nAdaptive Voting Ensemble:")
         print(f"  Average MAE: {adaptive_mae:.3f} mm")
         print(f"  Average RMSE: {adaptive_rmse:.3f} mm")
-        print(f"  Average R²: {adaptive_r2:.3f}")
+        print(f"  Average R2: {adaptive_r2:.3f}")
         print(f"  Average <5mm accuracy: {adaptive_5mm:.1f}%")
         print(f"  Average <10mm accuracy: {adaptive_10mm:.1f}%")
         
         print(f"\nStandard Voting Ensemble:")
         print(f"  Average MAE: {standard_mae:.3f} mm")
         print(f"  Average RMSE: {standard_rmse:.3f} mm")
-        print(f"  Average R²: {standard_r2:.3f}")
+        print(f"  Average R2: {standard_r2:.3f}")
         print(f"  Average <5mm accuracy: {standard_5mm:.1f}%")
         print(f"  Average <10mm accuracy: {standard_10mm:.1f}%")
         
@@ -816,9 +890,9 @@ class AdaptiveEnsembleTrainer:
         for target_name, metrics in self.results.items():
             print(f"\n{target_name}:")
             print(f"  Best Single Model: {metrics['Best_Single_Model']}")
-            print(f"  Optimized Ensemble - MAE: {metrics['Optimized_MAE']:.3f} mm (R²: {metrics['Optimized_R2']:.3f})")
-            print(f"  Adaptive Ensemble - MAE: {metrics['Adaptive_MAE']:.3f} mm (R²: {metrics['Adaptive_R2']:.3f})")
-            print(f"  Standard Ensemble - MAE: {metrics['Standard_MAE']:.3f} mm (R²: {metrics['Standard_R2']:.3f})")
+            print(f"  Optimized Ensemble - MAE: {metrics['Optimized_MAE']:.3f} mm (R2: {metrics['Optimized_R2']:.3f})")
+            print(f"  Adaptive Ensemble - MAE: {metrics['Adaptive_MAE']:.3f} mm (R2: {metrics['Adaptive_R2']:.3f})")
+            print(f"  Standard Ensemble - MAE: {metrics['Standard_MAE']:.3f} mm (R2: {metrics['Standard_R2']:.3f})")
             print(f"  Improvement over standard: {metrics['Improvement_Optimized_vs_Standard']:.1f}%")
             print(f"  Improvement over adaptive: {metrics['Improvement_Optimized_vs_Adaptive']:.1f}%")
             print(f"  Improvement over best single: {metrics['Improvement_Optimized_vs_Best']:.1f}%")
@@ -927,14 +1001,16 @@ def main():
     print("OPTIMIZED ADAPTIVE ENSEMBLE TRAINING WITH INTEGRATED DATA SOURCES")
     print("="*80)
     
-    # 1. Load integrated data
+    # 1. Load integrated data (train and validation files are kept separate)
     combined_df, train_df, val_df = trainer.load_integrated_data()
-    if combined_df is None:
+    if train_df is None or val_df is None:
         print("Failed to load integrated data")
         return
-    
-    # 2. Prepare training data with enhanced features
-    X_train, X_test, y_train, y_test = trainer.prepare_training_data(combined_df)
+
+    # 2. Prepare training data with enhanced features WITHOUT train/val leakage:
+    # feature engineering and scaling are fit ONLY on train_df, then applied
+    # to val_df. The legacy combined_df is intentionally not used.
+    X_train, X_test, y_train, y_test = trainer.prepare_training_data_split(train_df, val_df)
     if X_train is None:
         print("Failed to prepare training data")
         return

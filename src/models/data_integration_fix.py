@@ -1,228 +1,479 @@
 #!/usr/bin/env python3
 """
-ИСПРАВЛЕНИЕ ИНТЕГРАЦИИ ДАННЫХ
-Создание универсальных ключей для объединения трех источников
+Интеграция источников данных в Phase 1 train/validation CSV.
+
+Канонические входы (по умолчанию):
+  - data/vybor_unified_features.csv          — клинические пары supine/lateral (таргеты)
+  - data/train_displacement_dataset.csv        — Excel-таблица (доп. пациенты, без дублей Vybor)
+  - data/dicom_medical_features.csv            — опционально, без таргетов
+  - data/kits19_medical_grade_features.csv     — только reference-признаки (без таргетов в train)
+
+Режимы training_mode:
+  - labeled_only (по умолчанию): train/val только Vybor + Excel; KiTS19 не попадает в y
+  - all: legacy — все источники с полными таргетами в train (включая KiTS deltas)
+
+Выход:
+  - data/integrated_master_dataset.csv
+  - data/processed/train.csv, validation.csv
+  - data/processed/validation_clinical.csv   — holdout для честного аудита
+  - data/processed/integration_manifest.json
 """
 
-import pandas as pd
-import numpy as np
-import re
-from difflib import SequenceMatcher
+from __future__ import annotations
+
+import argparse
+import json
 import logging
+import sys
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.data.excel_displacement_adapter import (  # noqa: E402
+    DEFAULT_EXCEL_PATH,
+    load_excel_displacement_table,
+)
+from src.features.phase1_schema import BASE_FEATURES, TARGET_NAMES, normalize_dataframe
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+DEFAULT_DICOM_PATH = REPO_ROOT / "data" / "dicom_medical_features.csv"
+DEFAULT_VYBOR_PATH = REPO_ROOT / "data" / "vybor_unified_features.csv"
+DEFAULT_EXCEL_PATH_RESOLVED = REPO_ROOT / DEFAULT_EXCEL_PATH
+DEFAULT_KITS19_PATH = REPO_ROOT / "data" / "kits19_medical_grade_features.csv"
+PROCESSED_DIR = REPO_ROOT / "data" / "processed"
+
+LABELED_SOURCES = {"Vybor", "Excel"}
+KITS_MEDIANS_PATH = PROCESSED_DIR / "kits19_feature_medians.json"
+
+
 class DataIntegrationFix:
-    def __init__(self):
-        self.dicoms_df = None
-        self.vybor_df = None
-        self.kits19_df = None
-        
-    def load_data(self):
-        """Загрузить все данные"""
-        logger.info("Загрузка данных...")
-        
-        self.dicoms_df = pd.read_csv('scripts/archive/dicoms_out.csv')
-        self.vybor_df = pd.read_csv('data/vybor_unified_features.csv')
-        self.kits19_df = pd.read_csv('data/kits19_medical_grade_features.csv')
-        
-        logger.info(f"DICOMS: {len(self.dicoms_df)} строк")
-        logger.info(f"Vybor: {len(self.vybor_df)} строк")
-        logger.info(f"KiTS19: {len(self.kits19_df)} строк")
-        
-    def create_universal_keys(self):
-        """Создать универсальные ключи для объединения"""
+    def __init__(
+        self,
+        dicom_path: Path | str | None = None,
+        vybor_path: Path | str | None = None,
+        excel_path: Path | str | None = DEFAULT_EXCEL_PATH_RESOLVED,
+        kits19_path: Path | str | None = DEFAULT_KITS19_PATH,
+        training_mode: str = "labeled_only",
+        fill_sparse_from_kits: bool = True,
+    ):
+        self.dicom_path = Path(dicom_path) if dicom_path else DEFAULT_DICOM_PATH
+        self.vybor_path = Path(vybor_path) if vybor_path else DEFAULT_VYBOR_PATH
+        self.excel_path = Path(excel_path) if excel_path else None
+        self.kits19_path = Path(kits19_path) if kits19_path else None
+        self.training_mode = training_mode
+        self.fill_sparse_from_kits = fill_sparse_from_kits
+
+        self.dicoms_df: Optional[pd.DataFrame] = None
+        self.vybor_df: Optional[pd.DataFrame] = None
+        self.excel_df: Optional[pd.DataFrame] = None
+        self.kits19_df: Optional[pd.DataFrame] = None
+        self.kits_feature_reference: Optional[pd.DataFrame] = None
+
+    def load_data(self) -> None:
+        """Загрузить доступные источники."""
+        logger.info("Загрузка данных (mode=%s)...", self.training_mode)
+        logger.info("  Vybor: %s", self.vybor_path)
+        logger.info("  Excel: %s", self.excel_path)
+        logger.info("  DICOM: %s", self.dicom_path)
+        if self.kits19_path:
+            logger.info("  KiTS19 (features reference): %s", self.kits19_path)
+
+        if not self.vybor_path.exists():
+            raise FileNotFoundError(
+                f"Required Vybor dataset not found: {self.vybor_path}"
+            )
+
+        self.vybor_df = pd.read_csv(self.vybor_path)
+
+        if self.excel_path and self.excel_path.exists():
+            self.excel_df = load_excel_displacement_table(
+                str(self.excel_path),
+                vybor_df=self.vybor_df,
+            )
+            logger.info("Excel (unique vs Vybor): %s rows", len(self.excel_df))
+        else:
+            self.excel_df = pd.DataFrame()
+            if self.excel_path:
+                logger.warning("Excel file missing, skipping: %s", self.excel_path)
+
+        if self.dicom_path.exists():
+            self.dicoms_df = pd.read_csv(self.dicom_path)
+            logger.info("DICOM: %s rows", len(self.dicoms_df))
+        else:
+            self.dicoms_df = pd.DataFrame()
+            logger.warning("DICOM file missing, skipping: %s", self.dicom_path)
+
+        if self.kits19_path and self.kits19_path.exists():
+            kits_raw = normalize_dataframe(pd.read_csv(self.kits19_path))
+            self.kits19_df = kits_raw
+            base_cols = [c for c in BASE_FEATURES if c in kits_raw.columns]
+            self.kits_feature_reference = kits_raw[base_cols].copy()
+            logger.info(
+                "KiTS19: %s rows (reference features only, targets excluded from train in labeled_only)",
+                len(kits_raw),
+            )
+        else:
+            self.kits19_df = None
+            self.kits_feature_reference = None
+            if self.kits19_path:
+                logger.warning("KiTS19 file missing, skipping: %s", self.kits19_path)
+
+        logger.info("Vybor: %s rows", len(self.vybor_df))
+
+    def create_universal_keys(self) -> None:
+        """Создать universal_id для каждого источника."""
         logger.info("Создание универсальных ключей...")
-        
-        # 1. Создаем числовые ID для каждого датасета
-        self.dicoms_df['source_id'] = range(1, len(self.dicoms_df) + 1)
-        self.dicoms_df['source_name'] = 'DICOMS'
-        self.dicoms_df['universal_id'] = ['DICOMS_' + str(i) for i in range(1, len(self.dicoms_df) + 1)]
-        
-        self.vybor_df['source_id'] = range(1, len(self.vybor_df) + 1)
-        self.vybor_df['source_name'] = 'Vybor'
-        self.vybor_df['universal_id'] = ['Vybor_' + str(i).zfill(3) for i in range(1, len(self.vybor_df) + 1)]
-        
-        self.kits19_df['source_id'] = range(1, len(self.kits19_df) + 1)
-        self.kits19_df['source_name'] = 'KiTS19'
-        self.kits19_df['universal_id'] = ['KiTS19_' + str(i).zfill(5) for i in range(1, len(self.kits19_df) + 1)]
-        
-    def normalize_features(self):
-        """Нормализовать признаки для объединения"""
-        logger.info("Нормализация признаков...")
-        
-        # Создаем общие признаки из разных источников
-        
-        # Базовые демографические данные
-        common_features = ['age', 'bmi', 'sex']
-        
-        # Анатомические измерения
-        anatomical_features = [
-            'body_width_mm', 'body_depth_mm', 'body_area_mm2',
-            'kidney_left_volume_cm3', 'kidney_right_volume_cm3'
+
+        if self.dicoms_df is not None and len(self.dicoms_df) > 0:
+            self.dicoms_df = self.dicoms_df.copy()
+            self.dicoms_df["source_id"] = range(1, len(self.dicoms_df) + 1)
+            self.dicoms_df["source_name"] = "DICOMS"
+            self.dicoms_df["universal_id"] = [
+                f"DICOMS_{i}" for i in range(1, len(self.dicoms_df) + 1)
+            ]
+
+        self.vybor_df = self.vybor_df.copy()
+        self.vybor_df["source_id"] = range(1, len(self.vybor_df) + 1)
+        self.vybor_df["source_name"] = "Vybor"
+        self.vybor_df["universal_id"] = [
+            f"Vybor_{str(i).zfill(3)}" for i in range(1, len(self.vybor_df) + 1)
         ]
-        
-        # Позиционные данные
-        positional_features = [
-            'kidney_left_center_x_rel', 'kidney_left_center_y_rel', 'kidney_left_center_z_rel',
-            'kidney_right_center_x_rel', 'kidney_right_center_y_rel', 'kidney_right_center_z_rel'
-        ]
-        
-        # Нормализуем DICOMS данные
-        dicoms_normalized = self.normalize_dicoms_features()
-        
-        # Vybor уже имеет правильные названия
-        vybor_normalized = self.vybor_df.copy()
-        
-        # KiTS19 уже имеет правильные названия
-        kits19_normalized = self.kits19_df.copy()
-        
-        return dicoms_normalized, vybor_normalized, kits19_normalized
-    
-    def normalize_dicoms_features(self):
-        """Нормализовать DICOMS признаки к общему формату"""
-        df = self.dicoms_df.copy()
-        
-        # Создаем аналоги признаков из других источников
-        if 'body_com_x_mm' in df.columns:
-            df['kidney_left_center_x_rel'] = df['body_com_x_mm'] - 30  # Приблизительная позиция
-            df['kidney_right_center_x_rel'] = df['body_com_x_mm'] + 35
-            
-        if 'body_com_y_mm' in df.columns:
-            df['kidney_left_center_y_rel'] = df['body_com_y_mm'] + 20
-            df['kidney_right_center_y_rel'] = df['body_com_y_mm'] + 15
-            
-        if 'body_com_z_mm' in df.columns:
-            df['kidney_left_center_z_rel'] = df['body_com_z_mm'] - 10
-            df['kidney_right_center_z_rel'] = df['body_com_z_mm'] - 5
-        
-        # Создаем объемы почек на основе BMI
-        if 'bmi' in df.columns:
-            # Оценка объема почек на основе BMI (упрощенная формула)
-            df['kidney_left_volume_cm3'] = df['bmi'] * 3.5 + np.random.normal(0, 10, len(df))
-            df['kidney_right_volume_cm3'] = df['bmi'] * 3.8 + np.random.normal(0, 10, len(df))
-        
+
+        if self.excel_df is not None and len(self.excel_df) > 0:
+            self.excel_df = self.excel_df.copy()
+            self.excel_df["source_id"] = range(1, len(self.excel_df) + 1)
+            self.excel_df["source_name"] = "Excel"
+            if "case_id" not in self.excel_df.columns:
+                self.excel_df["case_id"] = [
+                    f"excel_{i}" for i in range(1, len(self.excel_df) + 1)
+                ]
+            self.excel_df["universal_id"] = self.excel_df["case_id"]
+
+        if self.kits19_df is not None and len(self.kits19_df) > 0:
+            self.kits19_df = self.kits19_df.copy()
+            self.kits19_df["source_id"] = range(1, len(self.kits19_df) + 1)
+            self.kits19_df["source_name"] = "KiTS19"
+            self.kits19_df["universal_id"] = [
+                f"KiTS19_{str(i).zfill(5)}" for i in range(1, len(self.kits19_df) + 1)
+            ]
+
+    def _apply_kits_median_fill(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Заполнить пропуски в BASE_FEATURES медианами KiTS19 (анатомия, не displacement)."""
+        if not self.fill_sparse_from_kits or self.kits_feature_reference is None:
+            return df
+
+        medians_path = KITS_MEDIANS_PATH
+        medians: dict = {}
+        if medians_path.exists():
+            medians = json.loads(medians_path.read_text(encoding="utf-8"))
+        else:
+            for col in BASE_FEATURES:
+                if col in self.kits_feature_reference.columns:
+                    medians[col] = float(self.kits_feature_reference[col].median(skipna=True))
+
+        out = df.copy()
+        filled_cols = []
+        for col in BASE_FEATURES:
+            if col not in out.columns or col not in medians:
+                continue
+            missing = out[col].isna()
+            if missing.any():
+                out.loc[missing, col] = medians[col]
+                filled_cols.append(col)
+        if filled_cols:
+            logger.info(
+                "Filled sparse BASE_FEATURES from KiTS medians: %s",
+                ", ".join(filled_cols[:8]) + ("..." if len(filled_cols) > 8 else ""),
+            )
+        return out
+
+    def normalize_dicoms_features(self) -> pd.DataFrame:
+        """Привести DICOM-таблицу к canonical schema (без синтетических таргетов)."""
+        if self.dicoms_df is None or len(self.dicoms_df) == 0:
+            return pd.DataFrame()
+
+        df = normalize_dataframe(self.dicoms_df.copy())
+        if "scan_position" not in df.columns and "patient_position" in df.columns:
+            df["scan_position"] = df["patient_position"]
+
+        usable = int(df[TARGET_NAMES].notna().all(axis=1).sum()) if all(
+            c in df.columns for c in TARGET_NAMES
+        ) else 0
+        if usable == 0:
+            logger.warning(
+                "DICOM table has no rows with complete displacement targets; "
+                "rows kept in master only."
+            )
         return df
-    
-    def create_master_dataset(self):
-        """Создать мастер-датасет с правильным объединением"""
+
+    def normalize_features(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Optional[pd.DataFrame]]:
+        """Нормализовать все источники."""
+        logger.info("Нормализация признаков (phase1_schema)...")
+        dicoms_normalized = self.normalize_dicoms_features()
+        vybor_normalized = normalize_dataframe(self.vybor_df.copy())
+        excel_normalized = (
+            self._apply_kits_median_fill(normalize_dataframe(self.excel_df.copy()))
+            if self.excel_df is not None and len(self.excel_df) > 0
+            else pd.DataFrame()
+        )
+        kits19_normalized = (
+            normalize_dataframe(self.kits19_df.copy())
+            if self.kits19_df is not None
+            else None
+        )
+        return dicoms_normalized, vybor_normalized, excel_normalized, kits19_normalized
+
+    def create_master_dataset(self) -> pd.DataFrame:
+        """Объединить источники в master CSV."""
         logger.info("Создание мастер-датасета...")
-        
-        dicoms_norm, vybor_norm, kits19_norm = self.normalize_features()
-        
-        # Объединяем все данные
-        master_df = pd.concat([
-            dicoms_norm.assign(source='DICOMS'),
-            vybor_norm.assign(source='Vybor'),
-            kits19_norm.assign(source='KiTS19')
-        ], ignore_index=True)
-        
-        # Сортируем по источнику
-        master_df = master_df.sort_values(['source', 'source_id'])
-        
-        logger.info(f"Мастер-датасет: {len(master_df)} строк, {len(master_df.columns)} колонок")
-        
+        dicoms_norm, vybor_norm, excel_norm, kits19_norm = self.normalize_features()
+
+        parts: List[pd.DataFrame] = []
+        if len(dicoms_norm) > 0:
+            parts.append(dicoms_norm.assign(source="DICOMS"))
+        parts.append(vybor_norm.assign(source="Vybor"))
+        if len(excel_norm) > 0:
+            parts.append(excel_norm.assign(source="Excel"))
+        if kits19_norm is not None and len(kits19_norm) > 0:
+            parts.append(kits19_norm.assign(source="KiTS19"))
+
+        master_df = pd.concat(parts, ignore_index=True)
+        master_df = normalize_dataframe(master_df)
+        master_df = master_df.sort_values(["source", "source_id"], na_position="last")
+
+        logger.info(
+            "Мастер-датасет: %s строк, источники: %s",
+            len(master_df),
+            master_df["source"].unique().tolist(),
+        )
         return master_df
-    
-    def analyze_data_quality(self, df):
-        """Анализ качества данных"""
+
+    @staticmethod
+    def _filter_trainable_rows(df: pd.DataFrame) -> pd.DataFrame:
+        """Оставить только строки с полным набором таргетов."""
+        present_targets = [c for c in TARGET_NAMES if c in df.columns]
+        if len(present_targets) != len(TARGET_NAMES):
+            missing = set(TARGET_NAMES) - set(present_targets)
+            raise ValueError(f"Dataset missing target columns: {sorted(missing)}")
+        before = len(df)
+        out = df.dropna(subset=present_targets, how="any").copy()
+        skipped = before - len(out)
+        if skipped:
+            logger.warning(
+                "Excluded %s rows without complete targets (kept %s trainable rows)",
+                skipped,
+                len(out),
+            )
+        return out
+
+    def _select_training_rows(self, trainable: pd.DataFrame) -> pd.DataFrame:
+        if self.training_mode == "labeled_only":
+            mask = trainable["source"].isin(LABELED_SOURCES)
+            selected = trainable[mask].copy()
+            excluded = len(trainable) - len(selected)
+            if excluded:
+                logger.info(
+                    "labeled_only: excluded %s KiTS19/DICOM rows from train/val (no paired CT labels)",
+                    excluded,
+                )
+            return selected
+        return trainable
+
+    def analyze_data_quality(self, df: pd.DataFrame) -> dict:
+        """Анализ пропусков."""
         logger.info("Анализ качества данных...")
-        
-        # Проверяем пропуски
         missing_analysis = {}
         for col in df.columns:
-            missing_count = df[col].isnull().sum()
-            missing_pct = (missing_count / len(df)) * 100
-            if missing_pct > 0:
+            missing_count = int(df[col].isnull().sum())
+            if missing_count > 0:
                 missing_analysis[col] = {
-                    'count': missing_count,
-                    'percentage': missing_pct
+                    "count": missing_count,
+                    "percentage": (missing_count / len(df)) * 100,
                 }
-        
-        # Сортируем по проценту пропусков
-        sorted_missing = sorted(missing_analysis.items(), key=lambda x: x[1]['percentage'], reverse=True)
-        
+
+        sorted_missing = sorted(
+            missing_analysis.items(),
+            key=lambda x: x[1]["percentage"],
+            reverse=True,
+        )
         logger.info("Топ-10 колонок с пропусками:")
         for col, stats in sorted_missing[:10]:
-            logger.info(f"  {col}: {stats['percentage']:.1f}% ({stats['count']} строк)")
-        
+            logger.info("  %s: %.1f%% (%s строк)", col, stats["percentage"], stats["count"])
         return missing_analysis
-    
-    def save_integrated_data(self, master_df):
-        """Сохранить интегрированные данные"""
-        logger.info("Сохранение интегрированных данных...")
-        
-        # Сохраняем мастер-датасет
-        master_df.to_csv('data/integrated_master_dataset.csv', index=False)
-        
-        # Создаем train/validation split
-        from sklearn.model_selection import train_test_split
-        
-        # Разделяем с сохранением пропорций источников
-        train_list = []
-        val_list = []
-        
-        for source in master_df['source'].unique():
-            source_data = master_df[master_df['source'] == source]
-            if len(source_data) > 4:  # Минимум 5 строк для валидации
-                source_train, source_val = train_test_split(
-                    source_data, test_size=0.2, random_state=42
+
+    def _split_clinical_labeled(
+        self, labeled_df: pd.DataFrame, test_size: float = 0.2
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Patient-level split для клинических источников (Vybor + Excel)."""
+        if len(labeled_df) < 5:
+            raise ValueError(
+                f"Too few labeled clinical rows ({len(labeled_df)}). "
+                "Need Vybor and/or unique Excel patients."
+            )
+
+        if len(labeled_df) >= 10:
+            train_df, val_df = train_test_split(
+                labeled_df, test_size=test_size, random_state=42
+            )
+        else:
+            # Мало строк — фиксированный holdout по case_id для воспроизводимости
+            sorted_df = labeled_df.sort_values("case_id").reset_index(drop=True)
+            n_val = max(1, int(round(len(sorted_df) * test_size)))
+            val_df = sorted_df.iloc[:n_val]
+            train_df = sorted_df.iloc[n_val:]
+            if len(train_df) < 3:
+                train_df, val_df = train_test_split(
+                    labeled_df, test_size=test_size, random_state=42
                 )
-                train_list.append(source_train)
-                val_list.append(source_val)
-            else:
-                # Если слишком мало данных, все в train
-                train_list.append(source_data)
-        
-        train_df = pd.concat(train_list, ignore_index=True)
-        val_df = pd.concat(val_list, ignore_index=True) if val_list else pd.DataFrame()
-        
-        # Сохраняем train/validation
-        train_df.to_csv('data/processed/train.csv', index=False)
-        if len(val_df) > 0:
-            val_df.to_csv('data/processed/validation.csv', index=False)
-        
-        logger.info(f"Train: {len(train_df)} строк")
-        logger.info(f"Validation: {len(val_df)} строк")
-        
+
+        return (
+            normalize_dataframe(train_df),
+            normalize_dataframe(val_df),
+        )
+
+    def save_integrated_data(self, master_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Сохранить master + train/validation split."""
+        logger.info("Сохранение интегрированных данных...")
+        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
+        master_path = REPO_ROOT / "data" / "integrated_master_dataset.csv"
+        master_df.to_csv(master_path, index=False)
+        logger.info("Saved %s", master_path)
+
+        trainable = self._filter_trainable_rows(master_df)
+        training_rows = self._select_training_rows(trainable)
+
+        if len(training_rows) < 5:
+            raise ValueError(
+                f"Too few training rows ({len(training_rows)}). "
+                "Need Vybor (+ optional unique Excel) with complete delta targets."
+            )
+
+        if self.training_mode == "labeled_only":
+            train_df, val_df = self._split_clinical_labeled(training_rows)
+        else:
+            train_list: List[pd.DataFrame] = []
+            val_list: List[pd.DataFrame] = []
+            for source in training_rows["source"].unique():
+                source_data = training_rows[training_rows["source"] == source]
+                if len(source_data) >= 5:
+                    source_train, source_val = train_test_split(
+                        source_data, test_size=0.2, random_state=42
+                    )
+                    train_list.append(source_train)
+                    val_list.append(source_val)
+                else:
+                    train_list.append(source_data)
+            train_df = normalize_dataframe(pd.concat(train_list, ignore_index=True))
+            val_df = (
+                normalize_dataframe(pd.concat(val_list, ignore_index=True))
+                if val_list
+                else pd.DataFrame()
+            )
+            if len(val_df) == 0:
+                train_df, val_df = train_test_split(
+                    training_rows, test_size=0.2, random_state=42
+                )
+                train_df = normalize_dataframe(train_df)
+                val_df = normalize_dataframe(val_df)
+
+        train_path = PROCESSED_DIR / "train.csv"
+        val_path = PROCESSED_DIR / "validation.csv"
+        clinical_val_path = PROCESSED_DIR / "validation_clinical.csv"
+        train_df.to_csv(train_path, index=False)
+        val_df.to_csv(val_path, index=False)
+        val_df.to_csv(clinical_val_path, index=False)
+
+        vybor_val = val_df[val_df["source"] == "Vybor"] if "source" in val_df.columns else val_df
+        if len(vybor_val) > 0:
+            vybor_audit_path = PROCESSED_DIR / "validation_vybor_only.csv"
+            vybor_val.to_csv(vybor_audit_path, index=False)
+            logger.info("Vybor-only holdout: %s rows -> %s", len(vybor_val), vybor_audit_path)
+
+        if self.kits_feature_reference is not None:
+            ref_path = PROCESSED_DIR / "kits19_feature_reference.csv"
+            self.kits_feature_reference.to_csv(ref_path, index=False)
+            logger.info("KiTS feature reference (no targets): %s", ref_path)
+
+        with open(PROCESSED_DIR / "feature_names.json", "w", encoding="utf-8") as fh:
+            json.dump(list(BASE_FEATURES), fh, indent=2, ensure_ascii=False)
+        with open(PROCESSED_DIR / "target_names.json", "w", encoding="utf-8") as fh:
+            json.dump(list(TARGET_NAMES), fh, indent=2, ensure_ascii=False)
+
+        manifest = {
+            "training_mode": self.training_mode,
+            "labeled_sources": sorted(LABELED_SOURCES),
+            "train_rows": int(len(train_df)),
+            "validation_rows": int(len(val_df)),
+            "train_by_source": train_df["source"].value_counts().to_dict() if "source" in train_df.columns else {},
+            "val_by_source": val_df["source"].value_counts().to_dict() if "source" in val_df.columns else {},
+            "master_rows_by_source": master_df["source"].value_counts().to_dict(),
+            "kits_in_train": self.training_mode != "labeled_only",
+            "note": "labeled_only excludes KiTS19 displacement targets (no paired-position CT).",
+        }
+        manifest_path = PROCESSED_DIR / "integration_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+        logger.info("Manifest: %s", manifest_path)
+
+        logger.info("Train: %s rows -> %s", len(train_df), train_path)
+        logger.info("Validation: %s rows -> %s", len(val_df), val_path)
         return train_df, val_df
-    
+
     def run(self):
-        """Запустить исправление интеграции"""
-        logger.info("🚀 ЗАПУСК ИСПРАВЛЕНИЯ ИНТЕГРАЦИИ ДАННЫХ")
-        
-        # 1. Загрузка данных
+        """Полный цикл интеграции."""
+        logger.info("ЗАПУСК ИНТЕГРАЦИИ ДАННЫХ (Phase 1, mode=%s)", self.training_mode)
         self.load_data()
-        
-        # 2. Создание универсальных ключей
         self.create_universal_keys()
-        
-        # 3. Создание мастер-датасета
         master_df = self.create_master_dataset()
-        
-        # 4. Анализ качества
         missing_analysis = self.analyze_data_quality(master_df)
-        
-        # 5. Сохранение результатов
         train_df, val_df = self.save_integrated_data(master_df)
-        
-        logger.info("✅ ИНТЕГРАЦИЯ ДАННЫХ ИСПРАВЛЕНА!")
-        
+        logger.info("ИНТЕГРАЦИЯ ЗАНЕРШЕНА")
         return master_df, train_df, val_df, missing_analysis
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Phase 1 data integration")
+    parser.add_argument(
+        "--mode",
+        choices=["labeled_only", "all"],
+        default="labeled_only",
+        help="labeled_only: Vybor+Excel only for train; all: legacy mixed sources",
+    )
+    parser.add_argument("--no-kits-fill", action="store_true", help="Skip KiTS median imputation for Excel rows")
+    parser.add_argument("--excel-path", type=Path, default=DEFAULT_EXCEL_PATH_RESOLVED)
+    parser.add_argument("--vybor-path", type=Path, default=DEFAULT_VYBOR_PATH)
+    return parser.parse_args()
+
+
 def main():
-    """Главная функция"""
-    fixer = DataIntegrationFix()
-    master_df, train_df, val_df, missing_analysis = fixer.run()
-    
-    print(f"\n📊 РЕЗУЛЬТАТЫ:")
-    print(f"   Мастер-датасет: {len(master_df)} строк")
-    print(f"   Train: {len(train_df)} строк")
-    print(f"   Validation: {len(val_df)} строк")
-    print(f"   Источники: {master_df['source'].unique().tolist()}")
-    
+    args = parse_args()
+    fixer = DataIntegrationFix(
+        vybor_path=args.vybor_path,
+        excel_path=args.excel_path,
+        training_mode=args.mode,
+        fill_sparse_from_kits=not args.no_kits_fill,
+    )
+    master_df, train_df, val_df, _missing = fixer.run()
+
+    print("\nРЕЗУЛЬТАТЫ:")
+    print(f"  Режим: {args.mode}")
+    print(f"  Мастер-датасет: {len(master_df)} строк")
+    print(f"  Train: {len(train_df)} строк")
+    print(f"  Validation: {len(val_df)} строк")
+    if "source" in train_df.columns:
+        print(f"  Train sources: {train_df['source'].value_counts().to_dict()}")
+    print(f"  Источники master: {master_df['source'].unique().tolist()}")
     return master_df, train_df, val_df
+
 
 if __name__ == "__main__":
     main()
