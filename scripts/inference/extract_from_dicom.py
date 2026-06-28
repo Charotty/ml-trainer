@@ -1,730 +1,666 @@
 #!/usr/bin/env python3
 """
-[LEGACY] DICOM extractor with non-canonical column names (X_upper_left, ...).
+DICOM preparation + feature extraction pipeline for amImageViewer / PACS exports.
 
-Prefer: python scripts/inference/enhanced_ct_extractor.py
+Typical layout (F:/На Боку):
+  Patient Name DD.MM.YYYY/
+    DICOMDIR, Images.cds, amImageViewer.exe
+    25111414/00000001 ...   # extensionless CT slices, often multiple series mixed
 
-Скрипт для извлечения данных из DICOM снимков.
+Nested archive (F:/На спине):
+  2. Контроль 2023/
+    .../PA000014/ST000001/SE000006/   # leaf series folders
 
-Извлекает:
-- Метаданные (пол, возраст, вес, рост, ИМТ)
-- 3D координаты почек (с помощью TotalSegmentator)
+Problems with scripts/inference/enhanced_ct_extractor.py on raw folders:
+  - passes the whole patient tree to TotalSegmentator → dicom2nifti MISSING_DICOM_FILES
+  - mixed series (scout + axial CT) in one directory
+  - lightweight HU fallback masks TS failures
 
-Использование:
-    # Обработка одной папки с DICOM файлами
-    python extract_from_dicom.py /path/to/dicom/folder
-    
-    # Обработка нескольких папок
-    python extract_from_dicom.py /path/to/folder1 /path/to/folder2
+This script:
+  1. discovers cases (flat or nested)
+  2. selects the main CT series (pydicom grouping)
+  3. converts via dcm2niix binary → NIfTI
+  4. runs TotalSegmentator on NIfTI (kidneys)
+  5. optionally runs enhanced_ct_extractor on the clean series folder (--canonical)
 
-Canonical alternative: python scripts/run_phase1_pipeline.py extract --dicom-root ...
-
-    # Обработка конкретного DICOM файла
-    python extract_from_dicom.py /path/to/file.dcm
-    
-    # Смешанный режим
-    python extract_from_dicom.py /path/to/folder /path/to/file.dcm --output results.csv
-    
-    # Только метаданные (без сегментации)
-    python extract_from_dicom.py /path/to/folder --no-segmentation
+Usage:
+  python scripts/inference/extract_from_dicom.py "F:/На Боку" --canonical --output results/boku.csv
+  python scripts/inference/extract_from_dicom.py /path/to/patient --device auto --fast
+  python scripts/inference/extract_from_dicom.py "F:/На Боку" --prep-only --temp-dir /tmp/dicom_prep
 """
 
-import os
-import sys
-import argparse
-import pandas as pd
-import numpy as np
-from pathlib import Path
-from datetime import datetime
-import warnings
+from __future__ import annotations
 
-warnings.warn(
-    "extract_from_dicom.py is legacy (non-canonical column names). "
-    "Use enhanced_ct_extractor.py — see: python scripts/run_phase1_pipeline.py info",
-    DeprecationWarning,
-    stacklevel=1,
+import argparse
+import gc
+import os
+import shutil
+import sys
+import tempfile
+import warnings
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import pandas as pd
+
+warnings.filterwarnings("ignore")
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from scripts.inference.dicom_prep import (  # noqa: E402
+    PrepResult,
+    cleanup_case_temp,
+    discover_patient_cases,
+    find_dcm2niix_executable,
+    group_dicom_series,
+    make_ascii_work_slug,
+    prepare_case,
+    resolve_totalsegmentator_device,
+    select_main_ct_series,
 )
-warnings.filterwarnings('ignore')
 
 try:
     import pydicom
 except ImportError:
-    print("❌ Ошибка: pydicom не установлен")
-    print("Установите: pip install pydicom")
+    print("ERROR: pydicom is required. pip install pydicom")
     sys.exit(1)
 
 try:
     import nibabel as nib
 except ImportError:
-    print("⚠️ Предупреждение: nibabel не установлен (нужен для чтения NIfTI)")
-    print("Установите: pip install nibabel")
-    nib = None
+    nib = None  # type: ignore[assignment]
 
 try:
-    import dcm2niix
-    DCM2NIIX_AVAILABLE = True
+    from totalsegmentator.python_api import totalsegmentator
 except ImportError:
-    print("⚠️ Предупреждение: dcm2niix не установлен")
-    print("Установите: pip install dcm2niix")
-    DCM2NIIX_AVAILABLE = False
+    totalsegmentator = None
 
-# TotalSegmentator опционален - проверим позже
+try:
+    from src.features.ct_geometry import kidney_features_from_mask
+except ImportError:
+    kidney_features_from_mask = None  # type: ignore[assignment,misc]
 
-
-def find_dicom_files(folder):
-    """Находит DICOM файлы в папке."""
-    dicom_files = []
-    for root, dirs, files in os.walk(folder):
-        for file in files:
-            # Ищем файлы с расширением .dcm/.DCM ИЛИ файлы без расширения
-            # (типичная структура DICOM с нумерованными файлами)
-            if (file.endswith('.dcm') or file.endswith('.DCM') or 
-                ('.' not in file and file.isdigit())):
-                dicom_files.append(os.path.join(root, file))
-    return sorted(dicom_files)
+from scripts.inference.enhanced_ct_extractor import (  # noqa: E402
+    _add_unified_features,
+    _get_accuracy_params,
+    _normalize_name,
+    extract_features_from_dicom_folder,
+)
 
 
-def find_dicom_folders(paths):
-    """
-    Находит папки с DICOM файлами из списка путей.
-    
-    Args:
-        paths: Список путей (файлы или папки)
-        
-    Returns:
-        list: Список папок, содержащих DICOM файлы
-    """
-    dicom_folders = set()
-    
-    for path in paths:
-        path = Path(path)
-        
-        if not path.exists():
-            print(f"  ⚠️ Путь не существует: {path}")
-            continue
-            
-        if path.is_file():
-            # Если это файл, проверяем DICOM ли он
-            if (path.suffix.lower() in ['.dcm'] or 
-                ('.' not in path.name and path.name.isdigit())):
-                dicom_folders.add(path.parent)
-            else:
-                print(f"  ⚠️ Файл не является DICOM: {path}")
-                
-        elif path.is_dir():
-            # Если это папка, ищем в ней DICOM файлы
-            dicom_files = find_dicom_files(str(path))
-            if dicom_files:
-                dicom_folders.add(path)
-                print(f"  📁 Найдено DICOM файлов в {path.name}: {len(dicom_files)}")
-            else:
-                # Если в папке нет файлов, ищем в подпапках
-                found_subfolders = False
-                for root, dirs, files in os.walk(str(path)):
-                    if any(f.endswith('.dcm') or f.endswith('.DCM') or 
-                           ('.' not in f and f.isdigit()) for f in files):
-                        dicom_folders.add(Path(root))
-                        found_subfolders = True
-                
-                if not found_subfolders:
-                    print(f"  ⚠️ DICOM файлы не найдены в: {path}")
-    
-    return sorted(list(dicom_folders))
-
-
-def extract_dicom_metadata(dicom_file):
-    """
-    Извлекает метаданные из DICOM файла.
-    
-    Args:
-        dicom_file: Путь к .dcm файлу
-        
-    Returns:
-        dict с метаданными
-    """
-    metadata = {}
-    
+def extract_dicom_metadata(dicom_file: Path) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {}
     try:
-        dcm = pydicom.dcmread(dicom_file)
-        
-        # Patient ID
-        metadata['patient_id'] = str(dcm.PatientID) if 'PatientID' in dcm else None
-        metadata['patient_name'] = str(dcm.PatientName) if 'PatientName' in dcm else None
-        
-        # Демография
-        if 'PatientSex' in dcm:
-            sex = dcm.PatientSex
-            metadata['sex'] = 1 if sex == 'M' else 0 if sex == 'F' else None
-        else:
-            metadata['sex'] = None
-        
-        if 'PatientAge' in dcm:
-            age_str = str(dcm.PatientAge).replace('Y', '').replace('y', '')
+        dcm = pydicom.dcmread(str(dicom_file), stop_before_pixels=True, force=True)
+        metadata["patient_id"] = str(dcm.PatientID) if "PatientID" in dcm else None
+        metadata["patient_name"] = str(dcm.PatientName) if "PatientName" in dcm else None
+        if "PatientSex" in dcm:
+            sex = str(dcm.PatientSex)
+            metadata["sex"] = 1 if sex == "M" else 0 if sex == "F" else None
+        if "PatientAge" in dcm:
+            age_str = str(dcm.PatientAge).replace("Y", "").replace("y", "")
             try:
-                metadata['age'] = int(age_str)
-            except:
-                metadata['age'] = None
-        else:
-            metadata['age'] = None
-        
-        # Антропометрия
-        metadata['weight_kg'] = float(dcm.PatientWeight) if 'PatientWeight' in dcm else None
-        metadata['height_m'] = float(dcm.PatientSize) if 'PatientSize' in dcm else None
-        
-        # ИМТ
-        if metadata['weight_kg'] and metadata['height_m']:
-            metadata['bmi'] = metadata['weight_kg'] / (metadata['height_m'] ** 2)
-        else:
-            metadata['bmi'] = None
-        
-        # Позиция пациента
-        metadata['patient_position'] = str(dcm.PatientPosition) if 'PatientPosition' in dcm else None
-        
-        # Параметры сканирования
-        metadata['study_date'] = str(dcm.StudyDate) if 'StudyDate' in dcm else None
-        metadata['slice_thickness'] = float(dcm.SliceThickness) if 'SliceThickness' in dcm else None
-        
-    except Exception as e:
-        print(f"  ⚠️ Ошибка чтения метаданных: {e}")
-    
+                metadata["age"] = int(age_str)
+            except ValueError:
+                metadata["age"] = None
+        metadata["weight_kg"] = float(dcm.PatientWeight) if "PatientWeight" in dcm else None
+        metadata["height_m"] = float(dcm.PatientSize) if "PatientSize" in dcm else None
+        if metadata.get("weight_kg") and metadata.get("height_m"):
+            metadata["bmi"] = metadata["weight_kg"] / (metadata["height_m"] ** 2)
+        metadata["patient_position"] = str(dcm.PatientPosition) if "PatientPosition" in dcm else None
+        metadata["study_date"] = str(dcm.StudyDate) if "StudyDate" in dcm else None
+        metadata["slice_thickness"] = float(dcm.SliceThickness) if "SliceThickness" in dcm else None
+    except Exception as exc:
+        metadata["metadata_error"] = str(exc)
     return metadata
 
 
-def get_kidney_coordinates_from_mask(mask_file):
-    """
-    Извлекает координаты 3 точек почки из маски сегментации.
-    
-    Args:
-        mask_file: Путь к .nii.gz файлу с маской
-        
-    Returns:
-        dict: {'upper': {'x', 'y', 'z'}, 'middle': {...}, 'lower': {...}}
-    """
-    if nib is None:
-        print("  ⚠️ nibabel не установлен, пропускаем извлечение координат")
-        return None
-    
-    try:
-        # Загружаем маску
-        kidney_img = nib.load(mask_file)
-        kidney_data = kidney_img.get_fdata()
-        affine = kidney_img.affine
-        
-        # Находим вокселы почки
-        kidney_voxels = np.argwhere(kidney_data > 0)
-        
-        if len(kidney_voxels) == 0:
-            print("  ⚠️ Маска пустая (почка не найдена)")
-            return None
-        
-        # Находим границы по Z (краниокаудальное направление)
-        z_min = kidney_voxels[:, 2].min()
-        z_max = kidney_voxels[:, 2].max()
-        z_middle = int((z_min + z_max) / 2)
-        
-        # Уровни для 3 точек
-        z_upper = int(z_min + (z_max - z_min) * 0.25)   # Верхняя четверть
-        z_lower = int(z_min + (z_max - z_min) * 0.75)   # Нижняя четверть
-        
-        coords = {}
-        
-        for level_name, z_level in [('upper', z_upper), ('middle', z_middle), ('lower', z_lower)]:
-            # Находим вокселы на этом уровне Z
-            slice_voxels = kidney_voxels[
-                (kidney_voxels[:, 2] >= z_level - 2) & 
-                (kidney_voxels[:, 2] <= z_level + 2)
-            ]
-            
-            if len(slice_voxels) == 0:
-                slice_voxels = kidney_voxels
-            
-            # Центроид в вокселях
-            centroid_voxel = slice_voxels.mean(axis=0)
-            
-            # Переводим в мировые координаты (мм)
-            centroid_world = affine @ np.append(centroid_voxel, 1)
-            
-            coords[level_name] = {
-                'x': float(centroid_world[0]),
-                'y': float(centroid_world[1]),
-                'z': float(centroid_world[2])
-            }
-        
-        return coords
-        
-    except Exception as e:
-        print(f"  ⚠️ Ошибка извлечения координат: {e}")
-        return None
-
-
-def convert_dicom_to_nifti(dicom_folder, output_folder, compress=True, filename_pattern='%p_%t_%s', timeout_seconds=1800):
-    """
-    Конвертирует DICOM файлы в NIfTI формат с помощью dcm2niix.
-    
-    Args:
-        dicom_folder: Папка с DICOM файлами
-        output_folder: Папка для сохранения NIfTI файлов
-        compress: Использовать gzip сжатие (.nii.gz)
-        filename_pattern: Шаблон имени файла
-        timeout_seconds: Время ожидания конвертации в секундах
-        
-    Returns:
-        tuple: (успех, список_nifti_файлов)
-    """
-    if not DCM2NIIX_AVAILABLE:
-        print("  ⚠️ dcm2niix недоступен, пропускаем конвертацию")
-        return False, []
-    
-    try:
-        import subprocess
-        import shutil
-        import sys
-        import os
-        
-        # Создаем выходную папку
-        Path(output_folder).mkdir(parents=True, exist_ok=True)
-        
-        # Находим dcm2niix
-        dcm2niix_cmd = shutil.which('dcm2niix')
-        if not dcm2niix_cmd:
-            # Ищем в Scripts папке Python
-            scripts_dir = os.path.join(os.path.dirname(sys.executable), 'Scripts')
-            dcm2niix_path = os.path.join(scripts_dir, 'dcm2niix.exe')
-            if os.path.exists(dcm2niix_path):
-                dcm2niix_cmd = dcm2niix_path
-            else:
-                print("  dcm2niix не найден, пропускаем конвертацию")
-                return False, []
-        
-        # Формируем команду dcm2niix
-        cmd = [
-            dcm2niix_cmd,
-            '-z', 'y' if compress else 'n',      # сжатие
-            '-f', filename_pattern,              # шаблон имени
-            '-o', output_folder,                  # выходная папка
-            '-b', 'n',                            # не создавать .json файлы
-            '-m', 'y',
-            '-x', 'n',                            # не обрезать изображение
-            dicom_folder                          # входная папка
-        ]
-        
-        print(f"  Конвертация DICOM → NIfTI...")
-        
-        # Запускаем конвертацию
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
-        
-        if result.returncode == 0:
-            # Ищем созданные NIfTI файлы
-            nifti_files = [str(f) for f in Path(output_folder).glob('*.nii*')]
-            if not nifti_files:
-                print("  ❌ Конвертация завершилась без ошибок, но NIfTI файлы не найдены")
-                return False, []
-            
-            print(f"  ✅ Конвертация успешна: {len(nifti_files)} NIfTI файлов")
-            return True, nifti_files
-        else:
-            print(f"  ❌ Ошибка конвертации: {result.stderr}")
-            return False, []
-            
-    except subprocess.TimeoutExpired:
-        print(f"  ⏰ Превышено время конвертации ({timeout_seconds} секунд)")
-        return False, []
-    except Exception as e:
-        print(f"  Ошибка конвертации: {e}")
-        return False, []
-
-
-def run_totalsegmentator(input_folder, output_folder, fast=False, roi_subset=None):
-    """
-    Запускает TotalSegmentator для сегментации почек.
-    
-    Args:
-        input_folder: Папка с DICOM
-        output_folder: Папка для сохранения масок
-        fast: Использовать быстрый режим
-        roi_subset: Список органов для сегментации
-        
-    Returns:
-        True если успешно, False если ошибка
-    """
-    try:
-        # Проверяем установлен ли TotalSegmentator
-        from totalsegmentator.python_api import totalsegmentator
-    except ImportError:
-        print("  TotalSegmentator не установлен")
-        print("  Установите: pip install TotalSegmentator")
+def _has_segmentation_output(output_folder: Path) -> bool:
+    if not output_folder.is_dir():
         return False
-    
-    def _run(fast_mode: bool) -> None:
-        print(f"  Запуск TotalSegmentator...")
-        if fast_mode:
-            print(f"  Используется быстрый режим")
+    for pattern in ("kidney_*.nii*", "segmentation.nii*"):
+        if list(output_folder.glob(pattern)):
+            return True
+    return any(output_folder.iterdir())
 
-        # Уменьшаем использование памяти/потоков для numpy/BLAS
-        import os
-        os.environ['OMP_NUM_THREADS'] = '1'
-        os.environ['MKL_NUM_THREADS'] = '1'
-        os.environ['OPENBLAS_NUM_THREADS'] = '1'
-        os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
-        totalsegmentator(
-            input=input_folder,
-            output=output_folder,
-            ml=True,
-            nr_thr_resamp=1,
-            nr_thr_saving=1,
-            roi_subset=roi_subset or ['kidney_right', 'kidney_left'],
-            fast=fast_mode,
-            fastest=fast_mode,
-            robust_crop=True,
-            quiet=True,
-            device='cpu'  # Явно указываем CPU
-        )
+def run_totalsegmentator(
+    input_path: Path,
+    output_folder: Path,
+    *,
+    fast: bool = False,
+    device: str = "auto",
+    roi_subset: Optional[Sequence[str]] = None,
+) -> bool:
+    if totalsegmentator is None:
+        print("  TotalSegmentator not installed (pip install TotalSegmentator)")
+        return False
+
+    dev = resolve_totalsegmentator_device(device)
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+    kwargs = {
+        "input": str(input_path),
+        "output": str(output_folder),
+        "nr_thr_resamp": 1,
+        "nr_thr_saving": 1,
+        "roi_subset": list(roi_subset or ["kidney_right", "kidney_left"]),
+        "fast": fast,
+        "quiet": True,
+        "device": dev,
+    }
 
     try:
-        _run(fast)
-        print(f"  Сегментация завершена")
-        return True
-        
-    except MemoryError as e:
+        print(f"  TotalSegmentator device={dev} input={input_path.name}")
+        totalsegmentator(**kwargs)
+        if _has_segmentation_output(output_folder):
+            return True
+        print("  TotalSegmentator: no mask files written")
+        return False
+    except TypeError:
+        kwargs.pop("roi_subset", None)
+        totalsegmentator(**kwargs)
+        if _has_segmentation_output(output_folder):
+            return True
+        print("  TotalSegmentator: no mask files written (fallback call)")
+        return False
+    except MemoryError as exc:
         if not fast:
-            print(f"  Ошибка памяти: {e}")
-            print(f"  Пробуем повторить в режиме --fast...")
-            try:
-                _run(True)
-                print(f"  Сегментация завершена")
-                return True
-            except Exception as retry_e:
-                e = retry_e
-
-        print(f"  Ошибка памяти: {e}")
-        print(f"  Попробуйте:")
-        print(f"     - Использовать --no-segmentation для извлечения только метаданных")
-        print(f"     - Уменьшить количество DICOM файлов (первые 100-200)")
-        print(f"     - Добавить больше оперативной памяти")
-        return False
-    except Exception as e:
-        if ("Unable to allocate" in str(e)) or ("memory" in str(e).lower()):
-            if not fast:
-                print(f"  Ошибка памяти: {e}")
-                print(f"  Пробуем повторить в режиме --fast...")
-                try:
-                    _run(True)
-                    print(f"  Сегментация завершена")
-                    return True
-                except Exception as retry_e:
-                    e = retry_e
-
-            print(f"  Ошибка памяти: {e}")
-            print(f"  Попробуйте:")
-            print(f"     - Использовать --no-segmentation для извлечения только метаданных")
-            print(f"     - Уменьшить количество DICOM файлов (первые 100-200)")
-            print(f"     - Добавить больше оперативной памяти")
-            print(f"  Ошибка TotalSegmentator: {e}")
-        return False
-
-
-def process_patient_folder(patient_folder, use_totalsegmentator=True, temp_dir='/tmp', fast=False, roi_subset=None, max_files=None, use_dcm2niix=True, compress_nifti=True, reuse_nifti=False):
-    """
-    Обрабатывает папку одного пациента.
-    
-    Args:
-        patient_folder: Путь к папке с DICOM пациента
-        use_totalsegmentator: Использовать ли TotalSegmentator
-        temp_dir: Папка для временных файлов
-        fast: Использовать быстрый режим
-        roi_subset: Список органов для сегментации
-        max_files: Максимальное количество файлов для обработки
-        use_dcm2niix: Использовать ли dcm2niix для конвертации
-        compress_nifti: Использовать сжатие NIfTI
-        reuse_nifti: Использовать уже созданные NIfTI во временной папке
-        
-    Returns:
-        dict с данными пациента или None
-    """
-    patient_folder = Path(patient_folder)
-    patient_id = patient_folder.name
-    
-    print(f"\n Обработка: {patient_id}")
-    
-    # 1. Находим DICOM файлы
-    dicom_files = find_dicom_files(patient_folder)
-    
-    if not dicom_files:
-        print(f"  DICOM файлы не найдены")
-        return None
-    
-    # Ограничиваем количество файлов если указано
-    if max_files and len(dicom_files) > max_files:
-        dicom_files = dicom_files[:max_files]
-        print(f"  Ограничено до {max_files} файлов для экономии памяти")
-    
-    print(f"  Найдено DICOM файлов: {len(dicom_files)}")
-    
-    # 2. Извлекаем метаданные из первого файла
-    metadata = extract_dicom_metadata(dicom_files[0])
-    metadata['patient_id'] = patient_id
-    metadata['dicom_folder'] = str(patient_folder)
-    metadata['num_dicom_files'] = len(dicom_files)
-    
-    # Добавляем информацию о конвертации
-    metadata['dcm2niix_used'] = use_dcm2niix and DCM2NIIX_AVAILABLE
-    metadata['nifti_compressed'] = compress_nifti if use_dcm2niix else None
-    metadata['reuse_nifti'] = bool(reuse_nifti)
-    
-    print(f"  Метаданные:")
-    if metadata.get('sex') is not None:
-        sex_label = 'М' if metadata['sex'] == 1 else 'Ж'
-        print(f"     Пол: {sex_label}")
-    if metadata.get('age'):
-        print(f"     Возраст: {metadata['age']} лет")
-    if metadata.get('bmi'):
-        print(f"     ИМТ: {metadata['bmi']:.1f}")
-    if metadata.get('patient_position'):
-        print(f"     Позиция: {metadata['patient_position']}")
-    
-    # 3. Конвертация DICOM → NIfTI (если включено)
-    nifti_folder = None
-    nifti_files = []
-    nifti_input_file = None
-    conversion_success = False
-    if use_dcm2niix and DCM2NIIX_AVAILABLE:
-        candidate_folder = Path(temp_dir) / f'nifti_{patient_id}'
-        existing_nifti_files = [str(f) for f in candidate_folder.glob('*.nii*')] if candidate_folder.exists() else []
-
-        if reuse_nifti and existing_nifti_files:
-            conversion_success, nifti_files = True, existing_nifti_files
-        else:
-            try:
-                import shutil
-                if candidate_folder.exists():
-                    shutil.rmtree(candidate_folder)
-            except Exception:
-                pass
-
-            conversion_success, nifti_files = convert_dicom_to_nifti(
-                str(patient_folder),
-                str(candidate_folder),
-                compress=compress_nifti
+            print(f"  memory error, retry --fast: {exc}")
+            return run_totalsegmentator(
+                input_path, output_folder, fast=True, device=device, roi_subset=roi_subset
             )
-        
-        if conversion_success and nifti_files:
-            nifti_folder = candidate_folder
-            try:
-                nifti_input_file = max(nifti_files, key=lambda p: Path(p).stat().st_size)
-            except Exception:
-                nifti_input_file = nifti_files[0]
+        print(f"  TotalSegmentator memory error: {exc}")
+        return False
+    except Exception as exc:
+        print(f"  TotalSegmentator error: {exc}")
+        return False
 
-            metadata['nifti_files_count'] = len(nifti_files)
-            metadata['nifti_folder'] = str(nifti_folder)
-            metadata['nifti_input_file'] = str(nifti_input_file) if nifti_input_file else None
-            print(f"  Создано NIfTI файлов: {len(nifti_files)}")
-        else:
-            print("  Конвертация NIfTI не удалась")
-    
-    # 4. Запускаем TotalSegmentator (если включено)
-    if use_totalsegmentator:
-        if not nifti_input_file:
-            print("  Сегментация пропущена: TotalSegmentator ожидает NIfTI, но конвертация не выполнена")
-            return metadata
-        
-        output_folder = Path(temp_dir) / f'segmentation_{patient_id}'
+
+def _kidney_features_from_roi_mask(mask_path: Path, prefix: str) -> Dict[str, float]:
+    if nib is None or kidney_features_from_mask is None:
+        return {}
+    try:
+        img = nib.load(str(mask_path))
+        data = img.get_fdata()
+        mask = data > 0
+        if not np.any(mask):
+            return {}
+        zooms = tuple(float(z) for z in img.header.get_zooms()[:3])
+        return kidney_features_from_mask(mask, img.affine, zooms, prefix)
+    except Exception as exc:
+        print(f"  kidney mask parse error ({mask_path.name}): {exc}")
+        return {}
+
+
+def extract_kidney_features_from_ts_output(output_folder: Path) -> Dict[str, float]:
+    result: Dict[str, float] = {}
+    for prefix, fname in (
+        ("kidney_right", "kidney_right.nii.gz"),
+        ("kidney_left", "kidney_left.nii.gz"),
+    ):
+        mask_path = output_folder / fname
+        if mask_path.exists():
+            result.update(_kidney_features_from_roi_mask(mask_path, prefix))
+
+    seg_file = output_folder / "segmentation.nii.gz"
+    if seg_file.exists() and nib is not None and kidney_features_from_mask is not None:
         try:
-            import shutil
-            if output_folder.exists():
-                shutil.rmtree(output_folder)
-        except Exception:
-            pass
-        output_folder.mkdir(parents=True, exist_ok=True)
-        
-        print("  Входные данные для сегментации: NIfTI")
-        
-        success = run_totalsegmentator(
-            str(nifti_input_file),
-            str(output_folder),
+            seg_img = nib.load(str(seg_file))
+            seg_data = seg_img.get_fdata()
+            affine = seg_img.affine
+            zooms = tuple(float(z) for z in seg_img.header.get_zooms()[:3])
+            for label_id, prefix in ((8, "kidney_right"), (9, "kidney_left")):
+                if any(k.startswith(prefix) for k in result):
+                    continue
+                mask = seg_data == label_id
+                if np.any(mask):
+                    result.update(kidney_features_from_mask(mask, affine, zooms, prefix))
+        except Exception as exc:
+            print(f"  combined segmentation parse error: {exc}")
+    return result
+
+
+def process_case(
+    case_folder: Path,
+    *,
+    work_dir: Path,
+    case_index: int = 1,
+    use_totalsegmentator: bool = True,
+    canonical: bool = False,
+    accuracy_mode: str = "balanced",
+    fast: bool = False,
+    device: str = "auto",
+    compress_nifti: bool = True,
+    reuse_nifti: bool = False,
+    prep_only: bool = False,
+    roi_subset: Optional[Sequence[str]] = None,
+    case_id: Optional[str] = None,
+    keep_temp: bool = False,
+) -> Dict[str, Any]:
+    case_folder = Path(case_folder)
+    case_id = case_id or case_folder.name
+    work_slug = make_ascii_work_slug(case_id, index=case_index)
+    print(f"\n[case] {case_id}  (work={work_slug})")
+
+    try:
+        return _process_case_inner(
+            case_folder=case_folder,
+            case_id=case_id,
+            work_slug=work_slug,
+            work_dir=work_dir,
+            case_index=case_index,
+            use_totalsegmentator=use_totalsegmentator,
+            canonical=canonical,
+            accuracy_mode=accuracy_mode,
             fast=fast,
-            roi_subset=roi_subset
+            device=device,
+            compress_nifti=compress_nifti,
+            reuse_nifti=reuse_nifti,
+            prep_only=prep_only,
+            roi_subset=roi_subset,
         )
-        
-        if success:
-            # 5. Извлекаем координаты из масок
-            # Правая почка
-            kidney_right_file = output_folder / 'kidney_right.nii.gz'
-            if kidney_right_file.exists():
-                coords_right = get_kidney_coordinates_from_mask(str(kidney_right_file))
-                
-                if coords_right:
-                    print(f"  Правая почка:")
-                    for level, coord in coords_right.items():
-                        print(f"     {level}: X={coord['x']:.1f}, Y={coord['y']:.1f}, Z={coord['z']:.1f}")
-                        metadata[f'X_{level}_right'] = coord['x']
-                        metadata[f'Y_{level}_right'] = coord['y']
-                        metadata[f'Z_{level}_right'] = coord['z']
-            
-            # Левая почка
-            kidney_left_file = output_folder / 'kidney_left.nii.gz'
-            if kidney_left_file.exists():
-                coords_left = get_kidney_coordinates_from_mask(str(kidney_left_file))
-                
-                if coords_left:
-                    print(f"  Левая почка:")
-                    for level, coord in coords_left.items():
-                        print(f"     {level}: X={coord['x']:.1f}, Y={coord['y']:.1f}, Z={coord['z']:.1f}")
-                        metadata[f'X_{level}_left'] = coord['x']
-                        metadata[f'Y_{level}_left'] = coord['y']
-                        metadata[f'Z_{level}_left'] = coord['z']
-    
-    return metadata
+    finally:
+        if not keep_temp:
+            cleanup_case_temp(work_dir, work_slug)
+        _release_gpu_memory()
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Извлечение данных из DICOM снимков'
-    )
-    parser.add_argument(
-        'paths',
-        nargs='+',
-        help='Пути к DICOM файлам или папкам (можно указать несколько через пробел)'
-    )
-    parser.add_argument(
-        '--output', '-o',
-        default='extracted_from_dicom.csv',
-        help='Путь для сохранения CSV файла (по умолчанию: extracted_from_dicom.csv)'
-    )
-    parser.add_argument(
-        '--no-segmentation',
-        action='store_true',
-        help='Не запускать TotalSegmentator (только метаданные)'
-    )
-    parser.add_argument(
-        '--temp-dir',
-        default='/tmp',
-        help='Папка для временных файлов сегментации'
-    )
-    parser.add_argument(
-        '--fast',
-        action='store_true',
-        help='Использовать быстрый режим TotalSegmentator (меньше памяти, ниже качество)'
-    )
-    parser.add_argument(
-        '--roi-subset',
-        nargs='*',
-        default=['kidney_right', 'kidney_left'],
-        help='Список органов для сегментации (по умолчанию: kidney_right kidney_left)'
-    )
-    parser.add_argument(
-        '--max-files',
-        type=int,
-        default=None,
-        help='Максимальное количество DICOM файлов для обработки (по умолчанию: все)'
-    )
-    parser.add_argument(
-        '--no-dcm2niix',
-        action='store_true',
-        help='Отключить конвертацию DICOM → NIfTI (использовать DICOM напрямую)'
-    )
-    parser.add_argument(
-        '--no-compression',
-        action='store_true',
-        help='Не использовать сжатие NIfTI (.nii вместо .nii.gz)'
-    )
-    parser.add_argument(
-        '--nifti-only',
-        action='store_true',
-        help='Только конвертировать DICOM → NIfTI без сегментации'
-    )
-    parser.add_argument(
-        '--reuse-nifti',
-        action='store_true',
-        help='Использовать уже созданные NIfTI во временной папке (не запускать повторно dcm2niix)'
-    )
-    
-    args = parser.parse_args()
-    
-    print("="*80)
-    print(" ИЗВЛЕЧЕНИЕ ДАННЫХ ИЗ DICOM")
-    print("="*80)
-    print(f"\n Указано путей: {len(args.paths)}")
-    for path in args.paths:
-        print(f"  - {path}")
-    print(f" Выходной файл: {args.output}")
-    print(f" TotalSegmentator: {'Выключен' if args.no_segmentation or args.nifti_only else 'Включен'}")
-    print(f" dcm2niix: {'Отключен' if args.no_dcm2niix else 'Включен'}")
-    print(f" Сжатие NIfTI: {'Отключено' if args.no_compression else 'Включено'}")
-    print(f" Reuse NIfTI: {'Включен' if args.reuse_nifti else 'Выключен'}")
-    if args.nifti_only:
-        print(f" Режим: Только конвертация NIfTI")
-    
-    # Находим все папки с DICOM файлами
-    print(f"\n Поиск DICOM файлов...")
-    patient_folders = find_dicom_folders(args.paths)
-    
-    if not patient_folders:
-        print(f"\n Ошибка: Папки с DICOM файлами не найдены")
-        sys.exit(1)
-    
-    print(f"\nНайдено папок с DICOM: {len(patient_folders)}")
-    
-    # Обрабатываем каждого пациента
-    all_patients_data = []
+def _release_gpu_memory() -> None:
+    gc.collect()
+    try:
+        import torch
 
-    for i, patient_folder in enumerate(patient_folders, 1):
-        print(f"\n[{i}/{len(patient_folders)}]", end=" ")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
 
-        patient_data = process_patient_folder(
-            patient_folder,
-            use_totalsegmentator=not args.no_segmentation and not args.nifti_only,
-            temp_dir=args.temp_dir,
-            fast=args.fast,
-            roi_subset=args.roi_subset,
-            max_files=args.max_files,
-            use_dcm2niix=not args.no_dcm2niix,
-            compress_nifti=not args.no_compression,
-            reuse_nifti=args.reuse_nifti
+
+def _process_case_inner(
+    *,
+    case_folder: Path,
+    case_id: str,
+    work_slug: str,
+    work_dir: Path,
+    case_index: int,
+    use_totalsegmentator: bool,
+    canonical: bool,
+    accuracy_mode: str,
+    fast: bool,
+    device: str,
+    compress_nifti: bool,
+    reuse_nifti: bool,
+    prep_only: bool,
+    roi_subset: Optional[Sequence[str]],
+) -> Dict[str, Any]:
+    prep = prepare_case(
+        case_folder,
+        work_dir,
+        case_id=case_id,
+        work_slug=work_slug,
+        case_index=case_index,
+        compress_nifti=compress_nifti,
+        reuse_nifti=reuse_nifti,
+    )
+
+    row: Dict[str, Any] = {
+        "case_id": case_id,
+        "work_slug": prep.work_slug,
+        "dicom_folder": str(case_folder),
+        "series_uid": prep.series.series_uid,
+        "series_description": prep.series.description,
+        "series_slices": prep.series.slice_count,
+        "series_input_dir": str(prep.series_input_dir),
+        "nifti_input_file": str(prep.nifti_file) if prep.nifti_file else None,
+        "prep_warnings": ";".join(prep.warnings) if prep.warnings else None,
+        "dcm2niix_available": find_dcm2niix_executable() is not None,
+    }
+
+    if prep.series.files:
+        row.update(extract_dicom_metadata(prep.series.files[0]))
+
+    if prep_only:
+        row["status"] = "prepared"
+        return row
+
+    kidney_feats: Dict[str, float] = {}
+    ts_ok = False
+    if use_totalsegmentator and prep.nifti_file:
+        seg_dir = work_dir / f"seg_{prep.work_slug}"
+        if seg_dir.exists():
+            shutil.rmtree(seg_dir, ignore_errors=True)
+        seg_dir.mkdir(parents=True, exist_ok=True)
+        ts_ok = run_totalsegmentator(
+            prep.nifti_file,
+            seg_dir,
+            fast=fast,
+            device=device,
+            roi_subset=roi_subset,
         )
+        if ts_ok:
+            kidney_feats = extract_kidney_features_from_ts_output(seg_dir)
+            row["totalsegmentator_status"] = "ok" if kidney_feats else "empty_masks"
+        else:
+            row["totalsegmentator_status"] = "failed"
+        gc.collect()
+    elif use_totalsegmentator:
+        row["totalsegmentator_status"] = "no_nifti"
 
-        if patient_data:
-            all_patients_data.append(patient_data)
-
-    # Сохраняем в CSV
-    if all_patients_data:
-        df = pd.DataFrame(all_patients_data)
-        
-        print(f"\n" + "="*80)
-        print(f" РЕЗУЛЬТАТЫ")
-        print("="*80)
-        print(f"\nУспешно обработано пациентов: {len(df)}")
-        print(f"Колонок данных: {len(df.columns)}")
-        
-        # Показываем статистику
-        print(f"\n Статистика:")
-        if 'sex' in df.columns:
-            males = (df['sex'] == 1).sum()
-            females = (df['sex'] == 0).sum()
-            print(f"  Мужчины: {males}, Женщины: {females}")
-        
-        if 'age' in df.columns:
-            print(f"  Средний возраст: {df['age'].mean():.1f} лет")
-        
-        if 'bmi' in df.columns:
-            print(f"  Средний ИМТ: {df['bmi'].mean():.1f}")
-        
-        # Проверяем наличие координат
-        coord_cols = [col for col in df.columns if col.startswith(('X_', 'Y_', 'Z_'))]
-        if coord_cols:
-            print(f"  Координатных колонок: {len(coord_cols)}")
-            complete_coords = df[coord_cols].notna().all(axis=1).sum()
-            print(f"  Пациентов с полными координатами: {complete_coords}")
-        
-        # Сохраняем
-        df.to_csv(args.output, index=False)
-        print(f"\n Данные сохранены: {args.output}")
-        
+    if canonical:
+        params = _get_accuracy_params(accuracy_mode)
+        try:
+            feats = extract_features_from_dicom_folder(
+                prep.series_input_dir,
+                downsample=params["downsample"],
+                max_slices=params["max_slices"],
+                enable_kidney_segmentation=False,
+                show_progress=False,
+                slice_strategy=params["slice_strategy"],
+            )
+            feats = _add_unified_features(feats)
+            row.update(feats)
+            row["status"] = "extracted"
+        except Exception as exc:
+            print(f"  enhanced extractor error: {exc}")
+            row["status"] = "partial" if kidney_feats else "error"
+            row["error"] = str(exc)
+        if kidney_feats:
+            row.update(kidney_feats)
+            row["kidney_source"] = "totalsegmentator_nifti"
     else:
-        print(f"\n Не удалось извлечь данные ни из одного пациента")
-    
-    print("\n" + "="*80)
+        row.update(kidney_feats)
+        for level in ("upper", "middle", "lower"):
+            for side in ("left", "right"):
+                for axis in ("x", "y", "z"):
+                    key = f"kidney_{side}_{level}_{axis}"
+                    legacy = f"{axis.upper()}_{level}_{side}"
+                    if key in kidney_feats:
+                        row[legacy] = kidney_feats[key]
+        row["status"] = "extracted" if kidney_feats else "metadata_only"
+        row["kidney_source"] = "totalsegmentator_nifti" if kidney_feats else None
+
+    if canonical and not row.get("full_name_key"):
+        row["full_name_key"] = _normalize_name(str(row.get("patient_name") or case_id))
+
+    return row
+
+
+def resolve_input_roots(paths: Sequence[str], dicom_root: Optional[Path]) -> List[Path]:
+    roots: List[Path] = []
+    if dicom_root:
+        roots.append(Path(dicom_root))
+    for p in paths:
+        roots.append(Path(p))
+    return roots
+
+
+def collect_cases(
+    roots: Sequence[Path],
+    *,
+    layout: str,
+    max_cases: Optional[int],
+) -> List[Tuple[Path, str]]:
+    """Return ordered list of (case_folder, unique_case_id)."""
+    cases: List[Tuple[Path, str]] = []
+    seen_paths: set[str] = set()
+    used_ids: set[str] = set()
+
+    def add(case: Path) -> None:
+        key = str(case.resolve())
+        if key in seen_paths:
+            return
+        seen_paths.add(key)
+        case_id = case.name
+        if case_id in used_ids:
+            suffix = 2
+            while f"{case_id} ({suffix})" in used_ids:
+                suffix += 1
+            case_id = f"{case_id} ({suffix})"
+        used_ids.add(case_id)
+        cases.append((case, case_id))
+
+    for root in roots:
+        if root.is_file():
+            add(root.parent)
+            continue
+        for case in discover_patient_cases(root, layout=layout):
+            add(case)
+            if max_cases and len(cases) >= max_cases:
+                return cases
+    return cases
+
+
+def _needs_reprocess(row: Dict[str, Any]) -> bool:
+    """A previously-saved row that should be recomputed (failed segmentation)."""
+    status = str(row.get("status", "")).strip()
+    ts = str(row.get("totalsegmentator_status", "")).strip()
+    if status in ("error", "metadata_only", "", "nan"):
+        return True
+    if ts not in ("ok",):
+        return True
+    return False
+
+
+def _load_existing_rows(out_path: Path) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+    """case_id -> row dict, plus original column order."""
+    if not out_path.exists():
+        return {}, []
+    df = pd.read_csv(out_path)
+    cols = list(df.columns)
+    rows: Dict[str, Dict[str, Any]] = {}
+    for rec in df.to_dict(orient="records"):
+        cleaned = {k: (None if (isinstance(v, float) and pd.isna(v)) else v) for k, v in rec.items()}
+        rows[str(cleaned.get("case_id"))] = cleaned
+    return rows, cols
+
+
+def _write_rows(out_path: Path, rows_by_id: Dict[str, Dict[str, Any]], order: List[str], base_cols: List[str]) -> pd.DataFrame:
+    ordered_rows = [rows_by_id[cid] for cid in order if cid in rows_by_id]
+    df = pd.DataFrame(ordered_rows)
+    if base_cols:
+        extra = [c for c in df.columns if c not in base_cols]
+        df = df.reindex(columns=base_cols + extra)
+    # Atomic tmp+rename is preferred, but os.replace over an existing file on the
+    # Windows DrvFs mount can raise PermissionError; fall back to a direct write.
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    try:
+        df.to_csv(tmp, index=False)
+        os.replace(tmp, out_path)
+    except (PermissionError, OSError):
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        df.to_csv(out_path, index=False)
+    return df
+
+
+def run_job(
+    root: Path,
+    out_path: Path,
+    *,
+    args: argparse.Namespace,
+    work_dir: Path,
+    prep_only: bool,
+) -> None:
+    print("\n" + "#" * 72)
+    print(f"# JOB root={root}")
+    print(f"#      output={out_path}")
+    print("#" * 72)
+
+    if not root.exists():
+        print(f"  [skip] root not found: {root}")
+        return
+
+    cases = collect_cases([root], layout=args.layout, max_cases=args.max_cases)
+    if not cases:
+        print("  [skip] no cases found")
+        return
+    print(f"  cases discovered: {len(cases)}")
+
+    existing_rows, base_cols = ({}, [])
+    if args.update_existing:
+        existing_rows, base_cols = _load_existing_rows(out_path)
+        if existing_rows:
+            print(f"  existing rows loaded: {len(existing_rows)} (update mode)")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rows_by_id: Dict[str, Dict[str, Any]] = dict(existing_rows)
+    order: List[str] = list(existing_rows.keys())
+    for _, cid in cases:
+        if cid not in order:
+            order.append(cid)
+
+    processed = skipped = 0
+    for i, (case_folder, case_id) in enumerate(cases, 1):
+        prior = existing_rows.get(case_id)
+        if args.update_existing and prior is not None and not _needs_reprocess(prior):
+            skipped += 1
+            continue
+
+        print(f"\n[{i}/{len(cases)}]", end=" ")
+        try:
+            row = process_case(
+                case_folder,
+                work_dir=work_dir,
+                case_index=i,
+                case_id=case_id,
+                use_totalsegmentator=not args.no_segmentation and not prep_only,
+                canonical=args.canonical,
+                accuracy_mode=args.accuracy_mode,
+                fast=args.fast,
+                device=args.device,
+                compress_nifti=not args.no_compression,
+                reuse_nifti=args.reuse_nifti,
+                prep_only=prep_only,
+                roi_subset=args.roi_subset,
+                keep_temp=args.keep_temp,
+            )
+            print(f"  -> {row.get('status')} ts={row.get('totalsegmentator_status')} slices={row.get('series_slices')}")
+        except Exception as exc:
+            print(f"  FAILED: {exc}")
+            row = {
+                "case_id": case_id,
+                "dicom_folder": str(case_folder),
+                "status": "error",
+                "error": str(exc),
+            }
+        rows_by_id[case_id] = row
+        processed += 1
+        # Incremental flush: a crash / disk-full never loses prior progress.
+        df = _write_rows(out_path, rows_by_id, order, base_cols)
+
+    df = _write_rows(out_path, rows_by_id, order, base_cols)
+    ok = sum(1 for r in rows_by_id.values() if str(r.get("totalsegmentator_status")) == "ok")
+    extracted = sum(1 for r in rows_by_id.values() if r.get("status") == "extracted")
+    print("\n" + "=" * 72)
+    print(f"JOB DONE -> {out_path}")
+    print(f"  rows={len(rows_by_id)} processed={processed} skipped(kept)={skipped}")
+    print(f"  status=extracted: {extracted}  totalsegmentator=ok: {ok}")
+    if args.canonical:
+        kidney_cols = [c for c in df.columns if c.startswith("kidney_") and c.endswith("_volume_cm3")]
+        if kidney_cols:
+            print(f"  kidney volumes present: {int(df[kidney_cols].notna().any(axis=1).sum())}")
+
+
+def _limit_threads() -> None:
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+    try:
+        import torch
+
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="DICOM prep + extraction pipeline")
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        help="Patient folder(s) or archive root(s)",
+    )
+    parser.add_argument("--dicom-root", type=Path, default=None, help="Alias for a single root folder")
+    parser.add_argument("--output", "-o", default="results/extract_from_dicom.csv")
+    parser.add_argument(
+        "--add-job",
+        action="append",
+        nargs=2,
+        metavar=("ROOT", "OUTPUT"),
+        default=[],
+        help="Extra (root, output) job; repeatable. E.g. --add-job 'F:/На спине' results/na_spine_full.csv",
+    )
+    parser.add_argument("--temp-dir", default=None, help="Work dir for NIfTI/segmentation (default: system temp)")
+    parser.add_argument("--layout", choices=["auto", "flat", "nested"], default="auto")
+    parser.add_argument("--max-cases", type=int, default=None)
+    parser.add_argument("--canonical", action="store_true", help="Merge enhanced_ct_extractor body features")
+    parser.add_argument("--accuracy-mode", default="balanced", choices=["high", "balanced", "fast", "minimal"])
+    parser.add_argument("--no-segmentation", action="store_true", help="Skip TotalSegmentator")
+    parser.add_argument("--prep-only", action="store_true", help="Only series selection + dcm2niix")
+    parser.add_argument("--nifti-only", action="store_true", help="Same as --prep-only")
+    parser.add_argument("--fast", action="store_true", help="Fast TotalSegmentator mode")
+    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "gpu"])
+    parser.add_argument("--no-compression", action="store_true", help="Uncompressed .nii from dcm2niix")
+    parser.add_argument("--reuse-nifti", action="store_true", help="Reuse NIfTI in temp dir")
+    parser.add_argument(
+        "--update-existing",
+        action="store_true",
+        help="Keep good rows in --output and only (re)process failed/new cases",
+    )
+    parser.add_argument(
+        "--keep-temp",
+        action="store_true",
+        help="Do not delete per-case scratch dirs (debug; defaults to cleanup)",
+    )
+    parser.add_argument(
+        "--roi-subset",
+        nargs="*",
+        default=["kidney_right", "kidney_left"],
+    )
+    args = parser.parse_args()
+
+    _limit_threads()
+
+    jobs: List[Tuple[Path, Path]] = []
+    primary_roots = resolve_input_roots(args.paths, args.dicom_root)
+    if primary_roots:
+        for r in primary_roots:
+            jobs.append((r, Path(args.output)))
+    for root_str, out_str in args.add_job:
+        jobs.append((Path(root_str), Path(out_str)))
+
+    if not jobs:
+        print("ERROR: provide at least one path / --dicom-root / --add-job")
+        return 2
+
+    work_dir = Path(args.temp_dir) if args.temp_dir else Path(tempfile.gettempdir()) / "ml_trainer_dicom"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    prep_only = args.prep_only or args.nifti_only
+
+    print("=" * 72)
+    print("DICOM PREP + EXTRACTION")
+    print("=" * 72)
+    print(f"jobs: {[(str(r), str(o)) for r, o in jobs]}")
+    print(f"layout: {args.layout}  device: {args.device}  accuracy: {args.accuracy_mode}")
+    print(f"dcm2niix: {find_dcm2niix_executable() or 'NOT FOUND'}")
+    print(f"TotalSegmentator: {'off' if args.no_segmentation else 'on'}  canonical: {args.canonical}")
+    print(f"update_existing: {args.update_existing}  keep_temp: {args.keep_temp}")
+    print(f"work_dir: {work_dir}")
+
+    for root, out_path in jobs:
+        run_job(root, out_path, args=args, work_dir=work_dir, prep_only=prep_only)
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

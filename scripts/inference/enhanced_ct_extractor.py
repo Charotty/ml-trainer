@@ -347,7 +347,7 @@ def _run_totalsegmentator(dicom_folder: Path, output_path: Path, kidney_only: bo
         kwargs = {
             'input': str(dicom_folder),
             'output': str(output_path),
-            'device': 'cpu',
+            'device': 'gpu',
             'fast': True,  # Используем быстрый режим
             'quiet': True,
             'nora_tag': 'None'  # Отключаем дополнительную обработку
