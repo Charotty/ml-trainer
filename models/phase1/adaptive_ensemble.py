@@ -12,7 +12,7 @@ from sklearn.ensemble import VotingRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Lasso, Ridge
 from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.model_selection import train_test_split, cross_val_score, KFold
+from sklearn.model_selection import train_test_split, cross_val_score, KFold, GroupKFold
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
@@ -27,9 +27,11 @@ from pathlib import Path
 # Добавляем путь к корневой директории для импорта наших модулей
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from src.features.displacement_axis_features import (
+    ANATOMICAL_FEATURES,
     DISPLACEMENT_AXIS_FEATURES,
     add_displacement_axis_features,
 )
+from src.features.leakage_safe import filter_model_features, is_leakage_feature
 from src.features.projection_enrichment import (
     add_projection_delta_proxies,
     attach_projection_features,
@@ -45,7 +47,11 @@ from src.features.phase1_schema import (
 warnings.filterwarnings('ignore')
 
 class AdaptiveEnsembleTrainer:
-    def __init__(self):
+    def __init__(self, *, z_head: str = "ensemble"):
+        self.z_head = z_head  # "ensemble" | "quantile_v7"
+        self.z_driver_names: list[str] = []
+        self._X_train_imputed: np.ndarray | None = None
+        self._X_val_imputed: np.ndarray | None = None
         self.scaler = StandardScaler()
         self.imputer = SimpleImputer(strategy='median')
         self.feature_names = []
@@ -60,7 +66,8 @@ class AdaptiveEnsembleTrainer:
         self.required_features = list(BASE_FEATURES)
         self.engineered_features = list(ENGINEERED_FEATURES)
         self.cross_features = list(CROSS_FEATURES)
-        self.displacement_axis_features = list(DISPLACEMENT_AXIS_FEATURES)
+        self.displacement_axis_features = filter_model_features(list(DISPLACEMENT_AXIS_FEATURES))
+        self.anatomical_features = list(ANATOMICAL_FEATURES)
         self.projection_features: list[str] = []
         self.target_columns = list(TARGET_NAMES)
         
@@ -168,9 +175,13 @@ class AdaptiveEnsembleTrainer:
         base_feature_cols = [col for col in self.required_features if col in df_enhanced.columns]
         engineered_feature_cols = [col for col in self.engineered_features if col in df_enhanced.columns]
         cross_feature_cols = [col for col in self.cross_features if col in df_enhanced.columns]
-        axis_feature_cols = [col for col in self.displacement_axis_features if col in df_enhanced.columns]
+        axis_feature_cols = [
+            c for c in self.displacement_axis_features if c in df_enhanced.columns
+        ]
+        anatomical_cols = [c for c in self.anatomical_features if c in df_enhanced.columns]
         projection_feature_cols = sorted(
-            c for c in df_enhanced.columns if c.startswith("proj_")
+            c for c in df_enhanced.columns
+            if c.startswith("proj_") and not is_leakage_feature(c)
         )
         self.projection_features = projection_feature_cols
         all_feature_cols = (
@@ -178,6 +189,7 @@ class AdaptiveEnsembleTrainer:
             + engineered_feature_cols
             + cross_feature_cols
             + axis_feature_cols
+            + anatomical_cols
             + projection_feature_cols
         )
 
@@ -303,6 +315,17 @@ class AdaptiveEnsembleTrainer:
             )
         target_cols = target_cols_train
 
+        finite_mask = np.isfinite(X_train_raw).any(axis=0)
+        if not bool(finite_mask.all()):
+            dropped = [feature_cols[i] for i, ok in enumerate(finite_mask) if not ok]
+            print(
+                f"WARNING: dropping {len(dropped)} all-NaN train features before imputation "
+                f"(e.g. {dropped[:3]})"
+            )
+            feature_cols = [feature_cols[i] for i, ok in enumerate(finite_mask) if ok]
+            X_train_raw = X_train_raw[:, finite_mask]
+            X_val_raw = X_val_raw[:, finite_mask]
+
         # Imputer is fit ONLY on train. Same fitted imputer is then applied
         # to val and persisted in save_model(). At inference time the API
         # is required to apply the same imputer before the scaler — see
@@ -315,6 +338,13 @@ class AdaptiveEnsembleTrainer:
         self.feature_names = feature_cols
         self.target_names = target_cols
         self.X_train = X_train_scaled
+        self._X_train_imputed = X_train_imp
+        self._X_val_imputed = X_val_imp
+        if self.z_head == "quantile_v7":
+            from src.models.z_quantile_v7 import resolve_z_driver_names
+
+            self.z_driver_names = resolve_z_driver_names(feature_cols)
+            print(f"V7 Z drivers: {len(self.z_driver_names)}")
 
         print(f"Base features: {len([c for c in self.required_features if c in feature_cols])}")
         print(f"Engineered features: {len([c for c in self.engineered_features if c in feature_cols])}")
@@ -585,6 +615,48 @@ class AdaptiveEnsembleTrainer:
             return {"sample_weight": sample_weight}
         return {}
 
+    def _optimize_weights_groupkfold(
+        self,
+        models,
+        X_train,
+        y_train,
+        groups,
+        target_name,
+        sample_weight=None,
+        *,
+        n_splits: int = 3,
+    ) -> dict:
+        """Average per-fold optimized ensemble weights (patient-level GroupKFold)."""
+        groups = np.asarray(groups)
+        n_unique = len(np.unique(groups))
+        n_splits = min(n_splits, n_unique)
+        if n_splits < 2:
+            target_weights = self.adaptive_weights.get(target_name, {})
+            total = sum(target_weights.get(n, 1.0) for n in models.keys()) or len(models)
+            return {name: target_weights.get(name, 1.0) / total for name in models.keys()}
+
+        splitter = GroupKFold(n_splits=n_splits)
+        fold_weights: list[dict] = []
+        for train_idx, val_idx in splitter.split(X_train, y_train, groups=groups):
+            w_fold = sample_weight[train_idx] if sample_weight is not None else None
+            fold_weights.append(
+                self.optimize_ensemble_weights(
+                    models,
+                    X_train[train_idx],
+                    y_train[train_idx],
+                    X_train[val_idx],
+                    y_train[val_idx],
+                    target_name,
+                    sample_weight=w_fold,
+                )
+            )
+
+        averaged: dict[str, float] = {}
+        for name in models.keys():
+            averaged[name] = float(np.mean([fw[name] for fw in fold_weights]))
+        total = sum(averaged.values()) or 1.0
+        return {name: w / total for name, w in averaged.items()}
+
     def optimize_ensemble_weights(
         self, models, X_train, y_train, X_val, y_val, target_name, sample_weight=None
     ):
@@ -759,9 +831,14 @@ class AdaptiveEnsembleTrainer:
         return cv_mae, cv_std
     
     def train_and_evaluate_adaptive_ensembles(
-        self, X_train, X_test, y_train, y_test, sample_weight=None
+        self, X_train, X_test, y_train, y_test, sample_weight=None, groups=None, *, fast_weights: bool = False
     ):
-        """Train and evaluate adaptive ensemble models with weight optimization"""
+        """Train and evaluate adaptive ensemble models with weight optimization.
+
+        When ``groups`` is provided, ensemble weights are tuned with GroupKFold
+        on the full training set; final models are always refit on 100% of
+        ``X_train`` (no 20% holdout waste).
+        """
         print("\nTraining and evaluating adaptive ensemble models...")
 
         weights = sample_weight
@@ -780,78 +857,166 @@ class AdaptiveEnsembleTrainer:
                     f"Using sample_weight: min={weights.min():.3f}, "
                     f"max={weights.max():.3f}, mean={weights.mean():.3f}"
                 )
-        
-        # Load base models per target (Z/Y tuned hyperparameters)
-        
+
+        use_groupkfold = groups is not None and len(np.unique(groups)) >= 2
+        if use_groupkfold:
+            print(f"Weight tuning: GroupKFold on {len(np.unique(groups))} patients; final fit on 100% train")
+        else:
+            print("Weight tuning: random 80/20 split; final fit on 100% train")
+
         results = {}
         self._best_single_maes = {}
         self._optimized_weights = {}
-        
-        if weights is not None:
-            X_train_main, X_val, y_train_main, y_val, w_main, w_val = train_test_split(
-                X_train, y_train, weights, test_size=0.2, random_state=42
-            )
-        else:
-            X_train_main, X_val, y_train_main, y_val = train_test_split(
-                X_train, y_train, test_size=0.2, random_state=42
-            )
-            w_main = w_val = None
-        
-        print(f"Data split for optimization: Train={X_train_main.shape}, Val={X_val.shape}, Test={X_test.shape}")
-        
+
+        print(f"Train={X_train.shape}, Test={X_test.shape}")
+
         for i, target_name in enumerate(self.target_names):
             print(f"\n{target_name}:")
             print("-" * 50)
-            
-            y_train_target = y_train_main[:, i]
-            y_val_target = y_val[:, i]
+
+            y_train_full = y_train[:, i]
             y_test_target = y_test[:, i]
-            w_target = self._per_target_sample_weights(target_name, y_train_target, w_main)
+            w_full = self._per_target_sample_weights(target_name, y_train_full, weights)
+
+            fallback_pred = float(np.nanmedian(y_train_full)) if len(y_train_full) else 0.0
+            if not np.isfinite(fallback_pred):
+                fallback_pred = 0.0
+
+            if (
+                self.z_head == "quantile_v7"
+                and target_name in {"kidney_left_delta_z", "kidney_right_delta_z"}
+                and self._X_train_imputed is not None
+                and self._X_val_imputed is not None
+                and self.z_driver_names
+            ):
+                from src.models.z_quantile_v7 import fit_quantile_z, predict_quantile_z
+
+                z_model, _ = fit_quantile_z(
+                    self._X_train_imputed,
+                    self.feature_names,
+                    y_train_full,
+                    self.z_driver_names,
+                    sample_weight=w_full,
+                )
+                self.trained_models[target_name] = z_model
+                optimized_pred = self._sanitize_predictions(
+                    predict_quantile_z(
+                        z_model,
+                        self._X_val_imputed,
+                        self.feature_names,
+                        self.z_driver_names,
+                    ),
+                    fallback_pred,
+                )
+                optimized_mae = mean_absolute_error(y_test_target, optimized_pred)
+                optimized_rmse = np.sqrt(mean_squared_error(y_test_target, optimized_pred))
+                optimized_r2 = r2_score(y_test_target, optimized_pred)
+                optimized_median_ae = np.median(np.abs(y_test_target - optimized_pred))
+                optimized_error_5mm = np.mean(np.abs(y_test_target - optimized_pred) < 5) * 100
+                optimized_error_10mm = np.mean(np.abs(y_test_target - optimized_pred) < 10) * 100
+                optimized_max_error = np.max(np.abs(y_test_target - optimized_pred))
+                optimized_outliers = np.sum(np.abs(y_test_target - optimized_pred) > 20)
+                optimized_std_error = np.std(y_test_target - optimized_pred)
+                self._best_single_maes[target_name] = optimized_mae
+                results[target_name] = {
+                    'Optimized_MAE': optimized_mae,
+                    'Optimized_RMSE': optimized_rmse,
+                    'Optimized_R2': optimized_r2,
+                    'Optimized_Median_AE': optimized_median_ae,
+                    'Optimized_Error_5mm': optimized_error_5mm,
+                    'Optimized_Error_10mm': optimized_error_10mm,
+                    'Optimized_Max_Error': optimized_max_error,
+                    'Optimized_Outliers_20mm': optimized_outliers,
+                    'Optimized_Std_Error': optimized_std_error,
+                    'Adaptive_MAE': optimized_mae,
+                    'Adaptive_RMSE': optimized_rmse,
+                    'Adaptive_R2': optimized_r2,
+                    'Adaptive_Median_AE': optimized_median_ae,
+                    'Adaptive_Error_5mm': optimized_error_5mm,
+                    'Adaptive_Error_10mm': optimized_error_10mm,
+                    'Adaptive_Max_Error': optimized_max_error,
+                    'Adaptive_Outliers_20mm': optimized_outliers,
+                    'Adaptive_Std_Error': optimized_std_error,
+                    'Standard_MAE': optimized_mae,
+                    'Standard_RMSE': optimized_rmse,
+                    'Standard_R2': optimized_r2,
+                    'Standard_Median_AE': optimized_median_ae,
+                    'Standard_Error_5mm': optimized_error_5mm,
+                    'Standard_Error_10mm': optimized_error_10mm,
+                    'Standard_Max_Error': optimized_max_error,
+                    'Standard_Outliers_20mm': optimized_outliers,
+                    'Standard_Std_Error': optimized_std_error,
+                    'Best_Single_Model': 'QuantileRegressor_v7',
+                    'Improvement_Optimized_vs_Standard': 0.0,
+                    'Improvement_Optimized_vs_Adaptive': 0.0,
+                    'Improvement_Optimized_vs_Best': 0.0,
+                }
+                print(f"  V7 QuantileRegressor ({len(self.z_driver_names)} drivers) - MAE: {optimized_mae:.3f} mm, R2: {optimized_r2:.3f}")
+                continue
 
             base_models = self.load_base_models(target_name)
-            
-            optimized_weights = self.optimize_ensemble_weights(
-                base_models,
-                X_train_main,
-                y_train_target,
-                X_val,
-                y_val_target,
-                target_name,
-                sample_weight=w_target,
-            )
+
+            if fast_weights:
+                priors = self.adaptive_weights.get(target_name, {})
+                total = sum(priors.get(n, 1.0) for n in base_models.keys()) or len(base_models)
+                optimized_weights = {n: priors.get(n, 1.0) / total for n in base_models.keys()}
+            elif use_groupkfold:
+                optimized_weights = self._optimize_weights_groupkfold(
+                    base_models,
+                    X_train,
+                    y_train_full,
+                    groups,
+                    target_name,
+                    sample_weight=w_full,
+                )
+            else:
+                if w_full is not None:
+                    X_wt, X_wv, y_wt, y_wv, w_wt, _w_wv = train_test_split(
+                        X_train, y_train_full, w_full, test_size=0.2, random_state=42
+                    )
+                else:
+                    X_wt, X_wv, y_wt, y_wv = train_test_split(
+                        X_train, y_train_full, test_size=0.2, random_state=42
+                    )
+                    w_wt = None
+                optimized_weights = self.optimize_ensemble_weights(
+                    base_models,
+                    X_wt,
+                    y_wt,
+                    X_wv,
+                    y_wv,
+                    target_name,
+                    sample_weight=w_wt,
+                )
             self._optimized_weights[target_name] = optimized_weights
-            
-            optimized_ensemble = self.create_optimized_voting_ensemble(base_models, target_name, optimized_weights)
+
+            optimized_ensemble = self.create_optimized_voting_ensemble(
+                base_models, target_name, optimized_weights
+            )
             adaptive_ensemble = self.create_adaptive_voting_ensemble(base_models, target_name)
             standard_ensemble = self.create_standard_voting_ensemble(base_models)
-            
-            fit_kwargs = {"sample_weight": w_target} if w_target is not None else {}
-            self._fit_voting_ensemble(optimized_ensemble, X_train_main, y_train_target, w_target)
-            self._fit_voting_ensemble(adaptive_ensemble, X_train_main, y_train_target, w_target)
-            self._fit_voting_ensemble(standard_ensemble, X_train_main, y_train_target, w_target)
-            
+
+            self._fit_voting_ensemble(optimized_ensemble, X_train, y_train_full, w_full)
+            self._fit_voting_ensemble(adaptive_ensemble, X_train, y_train_full, w_full)
+            self._fit_voting_ensemble(standard_ensemble, X_train, y_train_full, w_full)
+
             self.trained_models[target_name] = optimized_ensemble
-            
+
             print("  Base Models CV Performance:")
-            best_single_mae = float('inf')
+            best_single_mae = float("inf")
             for model_name in self.adaptive_weights[target_name].keys():
                 if model_name in base_models:
                     cv_mae, cv_std = self.evaluate_model_cv(
                         base_models[model_name],
-                        X_train_main,
-                        y_train_target,
+                        X_train,
+                        y_train_full,
                         model_name,
-                        sample_weight=w_target,
+                        sample_weight=w_full,
                     )
-                    # Track best single model MAE
                     if cv_mae < best_single_mae:
                         best_single_mae = cv_mae
             self._best_single_maes[target_name] = best_single_mae
-            
-            # Predictions
-            fallback_pred = float(np.nanmedian(y_train_target)) if len(y_train_target) else 0.0
-            if not np.isfinite(fallback_pred):
-                fallback_pred = 0.0
+
             optimized_pred = self._sanitize_predictions(
                 optimized_ensemble.predict(X_test), fallback_pred
             )
@@ -1067,7 +1232,9 @@ class AdaptiveEnsembleTrainer:
             'required_features': self.required_features,
             'target_columns': self.target_columns,
             'adaptive_weights': self.adaptive_weights,
-            'best_models': self.best_models
+            'best_models': self.best_models,
+            'z_head': self.z_head,
+            'z_driver_names': self.z_driver_names,
         }
         
         joblib.dump(model_data, filepath)

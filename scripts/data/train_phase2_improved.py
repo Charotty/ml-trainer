@@ -107,10 +107,10 @@ def integrate(vybor_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     integration.PROCESSED_DIR = PROCESSED_DIR
     fixer = DataIntegrationFix(
         vybor_path=vybor_path,
-        dicom_path=DICOM_PSEUDO_PATH,
+        dicom_path=ROOT / "data" / "dicom_medical_features.csv",
         kits19_path=HARMONIZED_DIR / "kits19_medical_grade_features_aligned.csv",
         excel_path=None,
-        training_mode="clinical_xlsx_kits_impute_only",
+        training_mode="labeled_only",
     )
     return fixer.run()[1:3]
 
@@ -127,7 +127,6 @@ def _axis_summary(per_target: pd.DataFrame) -> dict[str, float]:
 def main() -> int:
     vybor_path = rebuild_vybor()
     harmonize(vybor_path)
-    pseudo_label_dicom(vybor_path)
     train_df, val_df = integrate(vybor_path)
 
     print(
@@ -220,12 +219,16 @@ def main() -> int:
     )
     print(json.dumps(report, indent=2, ensure_ascii=False))
 
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, encoding="utf-8") as tmp:
+        val_df.to_csv(tmp.name, index=False)
+        val_csv = tmp.name
+
     subprocess.run(
         [
             sys.executable,
             str(ROOT / "scripts" / "validation" / "evaluate_metrics.py"),
             "--dataset",
-            str(vybor_path),
+            val_csv,
             "--model",
             str(MODEL_PATH),
             "--run-id",

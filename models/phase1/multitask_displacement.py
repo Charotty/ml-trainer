@@ -76,6 +76,8 @@ class MultitaskDisplacementModel:
         out = dict(point_pred)
         for name, value in mt.items():
             if name.endswith("_z"):
+                if z_blend <= 0.0:
+                    continue
                 w = z_blend
             elif name.endswith("_y"):
                 w = xy_blend

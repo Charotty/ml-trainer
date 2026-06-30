@@ -14,7 +14,10 @@ from src.features.displacement_axis_features import CLINICAL_EXTRA_COLUMNS
 from src.features.phase1_schema import TARGET_NAMES, normalize_dataframe
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_XLSX_PATH = REPO_ROOT / "Смещение - конечное -12  (2).xlsx"
+_DATA_XLSX = list((REPO_ROOT / "data").glob("*.xlsx"))
+DEFAULT_XLSX_PATH = (
+    _DATA_XLSX[0] if _DATA_XLSX else REPO_ROOT / "Смещение - конечное -12  (2).xlsx"
+)
 DEFAULT_OUTPUT_CSV = REPO_ROOT / "data" / "vybor_from_xlsx.csv"
 
 HEADER_ROW = 4

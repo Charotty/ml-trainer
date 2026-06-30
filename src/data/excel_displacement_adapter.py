@@ -87,6 +87,7 @@ def convert_excel_displacement_df(
         body_w = _parse_numeric_series(pd.Series([raw.get("abd_width_l3l4_mm")])).iloc[0]
         body_d = _parse_numeric_series(pd.Series([raw.get("abd_depth_l3l4_mm")])).iloc[0]
 
+        # Spine anchor: inter-kidney midpoint in supine (clinical table convention).
         spine_x = np.nanmean([left_sup_x, right_sup_x])
         spine_y = np.nanmean([left_sup_y, right_sup_y])
         spine_z = np.nanmean([left_sup_z, right_sup_z])
@@ -94,16 +95,39 @@ def convert_excel_displacement_df(
         left_rel = np.array([left_sup_x - spine_x, left_sup_y - spine_y, left_sup_z - spine_z], dtype=float)
         right_rel = np.array([right_sup_x - spine_x, right_sup_y - spine_y, right_sup_z - spine_z], dtype=float)
 
+        # Body COM: offset from spine using abdominal geometry (not identical to spine).
+        lordosis = _parse_numeric_series(pd.Series([raw.get("lumbar_lordosis_deg")])).iloc[0]
+        tilt = _parse_numeric_series(pd.Series([raw.get("s1_plate_tilt_deg")])).iloc[0]
+        depth = float(body_d) if pd.notna(body_d) else np.nan
+        width = float(body_w) if pd.notna(body_w) else np.nan
+        lordosis_rad = np.deg2rad(lordosis) if pd.notna(lordosis) else 0.0
+        tilt_rad = np.deg2rad(tilt) if pd.notna(tilt) else 0.0
+        com_y_off = depth * 0.06 * np.cos(lordosis_rad) if np.isfinite(depth) else 0.0
+        com_z_off = depth * 0.04 * np.sin(tilt_rad) if np.isfinite(depth) else 0.0
+        com_x_off = width * 0.02 if np.isfinite(width) else 0.0
         body_com = np.array([
-            np.nanmean([left_sup_x, right_sup_x]),
-            np.nanmean([left_sup_y, right_sup_y]),
-            np.nanmean([left_sup_z, right_sup_z]),
+            spine_x + com_x_off,
+            spine_y + com_y_off,
+            spine_z + com_z_off,
         ], dtype=float)
 
-        left_to_spine = float(np.linalg.norm(left_rel)) if np.isfinite(left_rel).all() else np.nan
-        right_to_spine = float(np.linalg.norm(right_rel)) if np.isfinite(right_rel).all() else np.nan
-        left_to_body = float(np.linalg.norm(left_rel)) if np.isfinite(left_rel).all() else np.nan
-        right_to_body = float(np.linalg.norm(right_rel)) if np.isfinite(right_rel).all() else np.nan
+        left_to_spine_vec = left_rel
+        right_to_spine_vec = right_rel
+        left_to_body_vec = np.array([
+            left_sup_x - body_com[0],
+            left_sup_y - body_com[1],
+            left_sup_z - body_com[2],
+        ], dtype=float)
+        right_to_body_vec = np.array([
+            right_sup_x - body_com[0],
+            right_sup_y - body_com[1],
+            right_sup_z - body_com[2],
+        ], dtype=float)
+
+        left_to_spine = float(np.linalg.norm(left_to_spine_vec)) if np.isfinite(left_to_spine_vec).all() else np.nan
+        right_to_spine = float(np.linalg.norm(right_to_spine_vec)) if np.isfinite(right_to_spine_vec).all() else np.nan
+        left_to_body = float(np.linalg.norm(left_to_body_vec)) if np.isfinite(left_to_body_vec).all() else np.nan
+        right_to_body = float(np.linalg.norm(right_to_body_vec)) if np.isfinite(right_to_body_vec).all() else np.nan
 
         record = {
             "case_id": case_id,
@@ -134,6 +158,18 @@ def convert_excel_displacement_df(
             "kidney_right_to_spine_distance": right_to_spine,
             "kidney_left_to_body_center_distance": left_to_body,
             "kidney_right_to_body_center_distance": right_to_body,
+            "kidney_lr_sep_x": right_sup_x - left_sup_x if pd.notna(right_sup_x) and pd.notna(left_sup_x) else np.nan,
+            "kidney_lr_sep_y": right_sup_y - left_sup_y if pd.notna(right_sup_y) and pd.notna(left_sup_y) else np.nan,
+            "kidney_lr_sep_z": right_sup_z - left_sup_z if pd.notna(right_sup_z) and pd.notna(left_sup_z) else np.nan,
+            "kidney_left_supine_middle_x": left_sup_x,
+            "kidney_left_supine_middle_y": left_sup_y,
+            "kidney_left_supine_middle_z": left_sup_z,
+            "kidney_right_supine_middle_x": right_sup_x,
+            "kidney_right_supine_middle_y": right_sup_y,
+            "kidney_right_supine_middle_z": right_sup_z,
+            "lumbar_lordosis_deg": lordosis,
+            "s1_plate_tilt_deg": tilt,
+            "abd_wall_thickness_mm": _parse_numeric_series(pd.Series([raw.get("abd_wall_thickness_mm")])).iloc[0],
         }
 
         for side, prefix in (("left", "kidney_left"), ("right", "kidney_right")):

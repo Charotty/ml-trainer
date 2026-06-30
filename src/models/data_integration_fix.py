@@ -56,9 +56,12 @@ DEFAULT_KITS19_PATH = REPO_ROOT / "data" / "kits19_medical_grade_features.csv"
 PROCESSED_DIR = REPO_ROOT / "data" / "processed"
 
 LABELED_SOURCES = {"Vybor", "Excel"}
+# KiTS19/DICOM never provide paired supine+lateral displacement labels.
+PROXY_TARGET_SOURCES = frozenset({"KiTS19", "DICOMS"})
 EXTENDED_TRAIN_SOURCES = {"Vybor", "Excel", "KiTS19", "DICOMS"}
 EXTENDED_MODES = frozenset({"harmonized_extended", "clinical_xlsx_extended", "clinical_xlsx_kits_impute_only"})
 KITS_IMPUTE_ONLY_MODES = frozenset({"clinical_xlsx_kits_impute_only"})
+DEPRECATED_EXTENDED_MODES = EXTENDED_MODES | frozenset({"all"})
 SAMPLE_WEIGHT_BY_QUALITY = {
     "clinical": 1.0,
     "proxy_kits": 0.08,
@@ -208,6 +211,25 @@ class DataIntegrationFix:
             )
         return out
 
+    @staticmethod
+    def strip_proxy_displacement_targets(df: pd.DataFrame) -> pd.DataFrame:
+        """Remove fake/proxy delta columns from KiTS19 and DICOM rows."""
+        if "source" not in df.columns:
+            return df
+        out = df.copy()
+        mask = out["source"].isin(PROXY_TARGET_SOURCES)
+        if not mask.any():
+            return out
+        present = [c for c in TARGET_NAMES if c in out.columns]
+        for col in present:
+            out.loc[mask, col] = np.nan
+        logger.info(
+            "Stripped proxy displacement targets from %s KiTS19/DICOM rows "
+            "(features kept for reference/imputation only)",
+            int(mask.sum()),
+        )
+        return out
+
     def normalize_dicoms_features(self) -> pd.DataFrame:
         """Привести DICOM-таблицу к canonical schema (без синтетических таргетов)."""
         if self.dicoms_df is None or len(self.dicoms_df) == 0:
@@ -267,6 +289,7 @@ class DataIntegrationFix:
 
         master_df = pd.concat(parts, ignore_index=True)
         master_df = normalize_dataframe(master_df)
+        master_df = self.strip_proxy_displacement_targets(master_df)
         master_df = master_df.sort_values(["source", "source_id"], na_position="last")
 
         logger.info(
@@ -295,45 +318,35 @@ class DataIntegrationFix:
         return out
 
     def _select_training_rows(self, trainable: pd.DataFrame) -> pd.DataFrame:
-        if self.training_mode == "labeled_only":
+        if self.training_mode in DEPRECATED_EXTENDED_MODES - {"all"}:
+            logger.warning(
+                "training_mode=%s is deprecated for regression: "
+                "KiTS19/DICOM proxy deltas are excluded (clinical labels only).",
+                self.training_mode,
+            )
+
+        # Step 1 audit fix: regression targets only from paired clinical sources.
+        if self.training_mode != "all":
             mask = trainable["source"].isin(LABELED_SOURCES)
             selected = trainable[mask].copy()
             excluded = len(trainable) - len(selected)
             if excluded:
                 logger.info(
-                    "labeled_only: excluded %s KiTS19/DICOM rows from train/val (no paired CT labels)",
+                    "%s: excluded %s non-clinical rows from train/val "
+                    "(KiTS19/DICOM not used as regression targets)",
+                    self.training_mode,
                     excluded,
                 )
             return selected
-        if self.training_mode == "harmonized_extended":
-            mask = trainable["source"].isin(EXTENDED_TRAIN_SOURCES)
-            selected = trainable[mask].copy()
-            logger.info(
-                "harmonized_extended: using %s labeled rows across %s",
-                len(selected),
-                selected["source"].value_counts().to_dict() if "source" in selected.columns else {},
-            )
-            return selected
-        if self.training_mode == "clinical_xlsx_extended":
-            mask = trainable["source"].isin(EXTENDED_TRAIN_SOURCES)
-            selected = trainable[mask].copy()
-            logger.info(
-                "clinical_xlsx_extended: using %s rows across %s",
-                len(selected),
-                selected["source"].value_counts().to_dict() if "source" in selected.columns else {},
-            )
-            return selected
-        if self.training_mode == "clinical_xlsx_kits_impute_only":
-            mask = trainable["source"].isin({"Vybor", "Excel", "DICOMS"})
-            selected = trainable[mask].copy()
-            logger.info(
-                "clinical_xlsx_kits_impute_only: train without KiTS19 rows (%s); "
-                "KiTS19 kept for median imputation only. sources=%s",
-                len(trainable) - len(selected),
-                selected["source"].value_counts().to_dict() if "source" in selected.columns else {},
-            )
-            return selected
-        return trainable
+
+        mask = trainable["source"].isin(LABELED_SOURCES)
+        selected = trainable[mask].copy()
+        logger.warning(
+            "legacy mode=all: KiTS19/DICOM proxy targets stripped; "
+            "using %s clinical rows only",
+            len(selected),
+        )
+        return selected
 
     @staticmethod
     def _attach_sample_weights(df: pd.DataFrame) -> pd.DataFrame:
@@ -512,11 +525,13 @@ class DataIntegrationFix:
             "train_by_source": train_df["source"].value_counts().to_dict() if "source" in train_df.columns else {},
             "val_by_source": val_df["source"].value_counts().to_dict() if "source" in val_df.columns else {},
             "master_rows_by_source": master_df["source"].value_counts().to_dict(),
-            "kits_in_train": self.training_mode not in {"labeled_only", *KITS_IMPUTE_ONLY_MODES},
+            "kits_in_train": False,
+            "dicom_in_train": False,
+            "proxy_targets_stripped": True,
             "note": (
-                "labeled_only excludes KiTS19/DICOM displacement targets. "
-                "harmonized_extended / clinical_xlsx_extended add harmonized KiTS19 proxy δ "
-                "and DICOM teacher pseudo-δ (clinical_xlsx_extended applies sample_weight)."
+                "Regression targets are clinical-only (Vybor/Excel paired supine+lateral). "
+                "KiTS19/DICOM rows remain in master for feature reference but proxy δ "
+                "columns are stripped and never used in train/val."
             ),
         }
         manifest_path = PROCESSED_DIR / "integration_manifest.json"

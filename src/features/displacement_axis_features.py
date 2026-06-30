@@ -19,10 +19,23 @@ DISPLACEMENT_AXIS_FEATURES: list[str] = [
     "kidney_right_z_span_supine_mm",
     "kidney_left_y_span_supine_mm",
     "kidney_right_y_span_supine_mm",
-    "kidney_left_z_delta_span_mm",
-    "kidney_right_z_delta_span_mm",
-    "kidney_left_y_delta_span_mm",
-    "kidney_right_y_delta_span_mm",
+    # delta_span_* excluded: lateral-derived leakage (see leakage_safe.py)
+]
+
+# Supine-only anatomical inputs (non-degenerate vs kidney-midpoint frame).
+ANATOMICAL_FEATURES: list[str] = [
+    "kidney_lr_sep_x",
+    "kidney_lr_sep_y",
+    "kidney_lr_sep_z",
+    "kidney_left_supine_middle_x",
+    "kidney_left_supine_middle_y",
+    "kidney_left_supine_middle_z",
+    "kidney_right_supine_middle_x",
+    "kidney_right_supine_middle_y",
+    "kidney_right_supine_middle_z",
+    "lumbar_lordosis_deg",
+    "s1_plate_tilt_deg",
+    "abd_wall_thickness_mm",
 ]
 
 

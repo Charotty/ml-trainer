@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build Vybor from xlsx, harmonize, pseudo-label DICOM, train clinical_xlsx_extended."""
+"""Build Vybor from xlsx, harmonize CT features, train on clinical labels only."""
 
 from __future__ import annotations
 
@@ -99,14 +99,14 @@ def build_pseudo_labeled_dicom(teacher: AdaptiveEnsembleTrainer, vybor_path: Pat
     return labeled
 
 
-def integrate_extended(vybor_path: Path, dicom_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+def integrate_clinical(vybor_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     integration.PROCESSED_DIR = PROCESSED_DIR
     fixer = DataIntegrationFix(
         vybor_path=vybor_path,
-        dicom_path=dicom_path,
+        dicom_path=ROOT / "data" / "dicom_medical_features.csv",
         kits19_path=HARMONIZED_DIR / "kits19_medical_grade_features_aligned.csv",
         excel_path=None,
-        training_mode="clinical_xlsx_extended",
+        training_mode="labeled_only",
     )
     master_df, train_df, val_df, _ = fixer.run()
     master_df.to_csv(ROOT / "data" / "integrated_master_dataset_xlsx.csv", index=False)
@@ -173,25 +173,19 @@ def main() -> int:
     print("=== 1. Build Vybor CSV from main xlsx (87 clinical rows) ===")
     vybor_path = build_vybor_csv()
 
-    print("\n=== 2. Harmonize DICOM/KiTS19 to xlsx Vybor frame ===")
+    print("\n=== 2. Harmonize DICOM/KiTS19 to xlsx Vybor frame (features only) ===")
     run_harmonization(vybor_path)
 
-    print("\n=== 3. Clinical teacher (full xlsx cohort) ===")
-    teacher = train_vybor_teacher(vybor_path)
-
-    print("\n=== 4. Pseudo-label harmonized DICOM ===")
-    build_pseudo_labeled_dicom(teacher, vybor_path)
-
-    print("\n=== 5. Integrate clinical_xlsx_extended dataset ===")
-    train_df, val_df = integrate_extended(vybor_path, DICOM_PSEUDO_PATH)
+    print("\n=== 3. Integrate clinical-only train/val (no KiTS/DICOM regression targets) ===")
+    train_df, val_df = integrate_clinical(vybor_path)
     print(f"Train: {len(train_df)}, Val (clinical only): {len(val_df)}")
     train_summary = summarize_train_sources(train_df)
     print(json.dumps(train_summary, indent=2, ensure_ascii=False))
 
-    print("\n=== 6. Train extended ensemble with sample_weight ===")
+    print("\n=== 4. Train ensemble on clinical labels only ===")
     train_model(train_df, val_df)
 
-    print("\n=== 7. Evaluate on clinical holdout ===")
+    print("\n=== 5. Evaluate on clinical holdout ===")
     run_dir = run_validation(vybor_path)
     summary_path = run_dir / "metrics" / "metrics_summary.csv"
     if summary_path.exists():

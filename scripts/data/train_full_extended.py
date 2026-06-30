@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Full extended training: 87 clinical + 210 KiTS19 + 159 DICOM pseudo (~438 train rows)."""
+"""Clinical training on xlsx labels only (87 patients).
+
+Legacy ``--legacy-extended`` optionally re-enables harmonize + DICOM pseudo-labeling
+for analysis, but KiTS19/DICOM proxy deltas are never used as regression targets.
+"""
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -28,7 +33,7 @@ from src.data.xlsx_displacement_parser import DEFAULT_OUTPUT_CSV  # noqa: E402
 from src.features.pseudo_labeling import attach_pseudo_displacement_labels  # noqa: E402
 from src.features.phase1_schema import TARGET_NAMES, normalize_dataframe  # noqa: E402
 from src.features.pipeline import apply_model_preprocessing, build_inference_matrix  # noqa: E402
-from src.models.data_integration_fix import DataIntegrationFix  # noqa: E402
+from src.models.data_integration_fix import DataIntegrationFix, DEFAULT_DICOM_PATH  # noqa: E402
 from src.models.left_z_calibrator import TARGET as LEFT_Z_TARGET, LeftZCalibrator  # noqa: E402
 
 HARMONIZED_DIR = ROOT / "data" / "harmonized"
@@ -121,14 +126,17 @@ def pseudo_label_dicom(teacher: AdaptiveEnsembleTrainer, vybor_path: Path) -> pd
     return labeled
 
 
-def integrate(vybor_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+def integrate(vybor_path: Path, *, legacy_extended: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
     integration.PROCESSED_DIR = PROCESSED_DIR
+    dicom_path = DICOM_PSEUDO_PATH if legacy_extended else DEFAULT_DICOM_PATH
     fixer = DataIntegrationFix(
         vybor_path=vybor_path,
-        dicom_path=DICOM_PSEUDO_PATH,
-        kits19_path=HARMONIZED_DIR / "kits19_medical_grade_features_aligned.csv",
+        dicom_path=dicom_path,
+        kits19_path=HARMONIZED_DIR / "kits19_medical_grade_features_aligned.csv"
+        if legacy_extended
+        else ROOT / "data" / "kits19_medical_grade_features.csv",
         excel_path=None,
-        training_mode="clinical_xlsx_extended",
+        training_mode="labeled_only",
     )
     return fixer.run()[1:3]
 
@@ -215,11 +223,20 @@ def make_bundle(trainer: AdaptiveEnsembleTrainer, calibrator: LeftZCalibrator):
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Train adaptive ensemble (clinical labels only)")
+    parser.add_argument(
+        "--legacy-extended",
+        action="store_true",
+        help="Run harmonize + DICOM pseudo-labeling (targets still clinical-only)",
+    )
+    args = parser.parse_args()
+
     vybor_path = rebuild_vybor()
-    harmonize(vybor_path)
-    teacher = train_teacher(vybor_path)
-    pseudo_label_dicom(teacher, vybor_path)
-    train_df, val_df = integrate(vybor_path)
+    if args.legacy_extended:
+        harmonize(vybor_path)
+        teacher = train_teacher(vybor_path)
+        pseudo_label_dicom(teacher, vybor_path)
+    train_df, val_df = integrate(vybor_path, legacy_extended=args.legacy_extended)
 
     src_counts = train_df["source"].value_counts().to_dict() if "source" in train_df.columns else {}
     print(

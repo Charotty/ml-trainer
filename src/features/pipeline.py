@@ -121,6 +121,19 @@ def predict_targets(
             predictions[LEFT_Z_TARGET],
         )
 
+    from src.models.right_z_calibrator import TARGET as RIGHT_Z_TARGET
+
+    right_calibrator = model_data.get("right_z_calibrator")
+    if right_calibrator is not None and RIGHT_Z_TARGET in predictions:
+        if isinstance(patient_data, pd.DataFrame):
+            patient_df = patient_data
+        else:
+            patient_df = pd.DataFrame([dict(patient_data)])
+        predictions[RIGHT_Z_TARGET] = right_calibrator.apply_scalar(
+            patient_df.iloc[0].to_dict(),
+            predictions[RIGHT_Z_TARGET],
+        )
+
     multitask = model_data.get("multitask_model")
     blend_cfg = model_data.get("multitask_blend") or {"z": 0.35, "xy": 0.15}
     if multitask is not None and multitask.fitted_:

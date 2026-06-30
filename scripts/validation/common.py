@@ -41,10 +41,13 @@ class PredictorBundle:
     models: Dict[str, object]
     imputer: Optional[Any] = None
     left_z_calibrator: Optional[Any] = None
+    right_z_calibrator: Optional[Any] = None
     side_z_models: Optional[dict] = None
     multitask_model: Optional[Any] = None
     multitask_blend: Optional[dict] = None
     quantile_model: Optional[Any] = None
+    z_head: str = "ensemble"
+    z_driver_names: Optional[List[str]] = None
 
 
 def ensure_run_dirs(base_output_dir: Path, run_id: str) -> Path:
@@ -78,6 +81,36 @@ def load_dataset(
     return df
 
 
+def load_ct_features(path: Path) -> pd.DataFrame:
+    """Load a CT feature table for inference-only workflows (targets optional)."""
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset not found: {path}")
+    return normalize_dataframe(pd.read_csv(path, low_memory=False))
+
+
+def load_model_bundle(model_path: Path) -> PredictorBundle:
+    """Load a pretrained displacement model artifact."""
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model not found: {model_path}")
+    payload = joblib.load(model_path)
+    return PredictorBundle(
+        mode="pretrained_adaptive_ensemble",
+        feature_names=payload["feature_names"],
+        target_names=list(payload.get("target_names", payload["models"].keys())),
+        scaler=payload["scaler"],
+        models=payload["models"],
+        imputer=payload.get("imputer"),
+        left_z_calibrator=payload.get("left_z_calibrator"),
+        right_z_calibrator=payload.get("right_z_calibrator"),
+        side_z_models=payload.get("side_z_models"),
+        multitask_model=payload.get("multitask_model"),
+        multitask_blend=payload.get("multitask_blend"),
+        quantile_model=payload.get("quantile_model"),
+        z_head=payload.get("z_head", "ensemble"),
+        z_driver_names=payload.get("z_driver_names"),
+    )
+
+
 def vector_norm(left_xyz: np.ndarray, right_xyz: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     left = np.linalg.norm(left_xyz, axis=1)
     right = np.linalg.norm(right_xyz, axis=1)
@@ -109,6 +142,7 @@ def build_or_load_predictor(
                 models=payload["models"],
                 imputer=payload.get("imputer"),
                 left_z_calibrator=payload.get("left_z_calibrator"),
+                right_z_calibrator=payload.get("right_z_calibrator"),
                 side_z_models=payload.get("side_z_models"),
                 multitask_model=payload.get("multitask_model"),
                 multitask_blend=payload.get("multitask_blend"),
@@ -164,12 +198,23 @@ def predict_df(bundle: PredictorBundle, df: pd.DataFrame) -> pd.DataFrame:
             "models": bundle.models,
         }
         X_scaled = apply_model_preprocessing(X, model_data)
+        X_imputed = bundle.imputer.transform(X) if bundle.imputer is not None else X
     else:
         X_scaled = bundle.scaler.transform(df_norm[bundle.feature_names].values)
+        X_imputed = X_scaled
+
+    z_head = getattr(bundle, "z_head", "ensemble")
+    z_drivers = getattr(bundle, "z_driver_names", None) or []
+    from src.models.z_quantile_v7 import Z_TARGETS, predict_quantile_z
 
     rows = {}
     for target_name, model in bundle.models.items():
-        rows[target_name] = model.predict(X_scaled)
+        if z_head == "quantile_v7" and target_name in Z_TARGETS and z_drivers:
+            rows[target_name] = predict_quantile_z(
+                model, X_imputed, bundle.feature_names, z_drivers
+            )
+        else:
+            rows[target_name] = model.predict(X_scaled)
     pred_df = pd.DataFrame(rows, index=df.index)
 
     side_z = getattr(bundle, "side_z_models", None)
@@ -192,13 +237,26 @@ def predict_df(bundle: PredictorBundle, df: pd.DataFrame) -> pd.DataFrame:
                 pred_df[LEFT_Z_TARGET].values,
             )
 
+    if getattr(bundle, "right_z_calibrator", None) is not None:
+        from src.models.right_z_calibrator import TARGET as RIGHT_Z_TARGET
+
+        if RIGHT_Z_TARGET in pred_df.columns:
+            pred_df[RIGHT_Z_TARGET] = bundle.right_z_calibrator.transform(
+                df_norm,
+                pred_df[RIGHT_Z_TARGET].values,
+            )
+
     if getattr(bundle, "multitask_model", None) is not None and getattr(
         bundle.multitask_model, "fitted_", False
     ):
         blend = getattr(bundle, "multitask_blend", None) or {"z": 0.35, "xy": 0.15}
         mt = bundle.multitask_model.predict(X_scaled)
+        z_blend = float(blend.get("z", 0.35))
+        xy_blend = float(blend.get("xy", 0.15))
         for j, tgt in enumerate(bundle.target_names):
-            w = float(blend.get("z", 0.35)) if tgt.endswith("_z") else float(blend.get("xy", 0.15))
+            if tgt.endswith("_z") and z_blend <= 0.0:
+                continue
+            w = z_blend if tgt.endswith("_z") else xy_blend
             pred_df[tgt] = (1.0 - w) * pred_df[tgt].values + w * mt[:, j]
     return pred_df
 

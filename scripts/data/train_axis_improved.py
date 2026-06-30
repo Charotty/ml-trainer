@@ -95,10 +95,10 @@ def integrate(vybor_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     integration.PROCESSED_DIR = PROCESSED_DIR
     fixer = DataIntegrationFix(
         vybor_path=vybor_path,
-        dicom_path=DICOM_PSEUDO_PATH,
-        kits19_path=HARMONIZED_DIR / "kits19_medical_grade_features_aligned.csv",
+        dicom_path=ROOT / "data" / "dicom_medical_features.csv",
+        kits19_path=ROOT / "data" / "kits19_medical_grade_features.csv",
         excel_path=None,
-        training_mode="clinical_xlsx_extended",
+        training_mode="labeled_only",
     )
     return fixer.run()[1:3]
 
@@ -124,8 +124,7 @@ def axis_metrics(trainer: AdaptiveEnsembleTrainer, val_df: pd.DataFrame) -> dict
 def main() -> int:
     vybor_path = rebuild_vybor()
     harmonize(vybor_path)
-    teacher = train_teacher(vybor_path)
-    pseudo_label_dicom(teacher, vybor_path)
+    train_teacher(vybor_path)
     train_df, val_df = integrate(vybor_path)
 
     trainer = AdaptiveEnsembleTrainer()

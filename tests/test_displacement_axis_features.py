@@ -31,10 +31,7 @@ def test_adds_z_y_ratio_features():
             "kidney_right_z_span_supine_mm",
             "kidney_left_y_span_supine_mm",
             "kidney_right_y_span_supine_mm",
-            "kidney_left_z_delta_span_mm",
-            "kidney_right_z_delta_span_mm",
-            "kidney_left_y_delta_span_mm",
-            "kidney_right_y_delta_span_mm",
         ):
             continue
         assert col in out.columns
+    assert "kidney_left_z_delta_span_mm" not in DISPLACEMENT_AXIS_FEATURES

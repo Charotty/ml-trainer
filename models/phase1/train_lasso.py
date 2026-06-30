@@ -48,25 +48,15 @@ class LassoTrainer:
         
         # Load datasets
         vybor_df = pd.read_csv('data/vybor_unified_features.csv')
-        kits19_df = pd.read_csv('data/kits19_medical_grade_features.csv')
         
         print(f"Vybor dataset: {len(vybor_df)} cases")
-        print(f"KiTS19 dataset: {len(kits19_df)} cases")
         
-        # Process datasets
         combined_data = []
         
-        # Process vybor dataset
         if 'kidney_left_delta_x' in vybor_df.columns:
             vybor_processed = self.process_dataset(vybor_df, 'vybor')
             if vybor_processed is not None:
                 combined_data.append(vybor_processed)
-        
-        # Process kits19 dataset
-        if 'kidney_left_delta_x' in kits19_df.columns:
-            kits19_processed = self.process_dataset(kits19_df, 'kits19')
-            if kits19_processed is not None:
-                combined_data.append(kits19_processed)
         
         if combined_data:
             final_df = pd.concat(combined_data, ignore_index=True)

@@ -29,6 +29,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-cases", type=int, default=6)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--test-size", type=float, default=0.3)
+    parser.add_argument(
+        "--holdout",
+        action="store_true",
+        help="Plot all rows in dataset (no re-split)",
+    )
     return parser.parse_args()
 
 
@@ -205,6 +210,7 @@ def main() -> int:
         model_path=model_path,
         test_size=args.test_size,
         seed=args.seed,
+        holdout_eval=args.holdout,
     )
     preds = predict_df(bundle, eval_df)
 
