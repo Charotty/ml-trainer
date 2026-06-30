@@ -26,6 +26,14 @@ from pathlib import Path
 
 # Добавляем путь к корневой директории для импорта наших модулей
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+from src.features.displacement_axis_features import (
+    DISPLACEMENT_AXIS_FEATURES,
+    add_displacement_axis_features,
+)
+from src.features.projection_enrichment import (
+    add_projection_delta_proxies,
+    attach_projection_features,
+)
 from src.features.phase1_schema import (
     BASE_FEATURES,
     CROSS_FEATURES,
@@ -45,22 +53,25 @@ class AdaptiveEnsembleTrainer:
         self.results = {}
         self.trained_models = {}  # Для хранения обученных моделей
         self.X_train = None  # Для confidence estimator
+        self.train_sample_weights = None
         self.cv_splitter = KFold(n_splits=5, shuffle=True, random_state=42)  # Воспроизводимый CV
         
         # Canonical schema: config/phase1_feature_schema.yaml + src/features/phase1_schema.py
         self.required_features = list(BASE_FEATURES)
         self.engineered_features = list(ENGINEERED_FEATURES)
         self.cross_features = list(CROSS_FEATURES)
+        self.displacement_axis_features = list(DISPLACEMENT_AXIS_FEATURES)
+        self.projection_features: list[str] = []
         self.target_columns = list(TARGET_NAMES)
         
-        # Best models per target based on comparison results
+        # Best models per target — Z/Y tuned for huber GBT / deeper RF
         self.best_models = {
             'kidney_left_delta_x': 'RandomForest',
-            'kidney_left_delta_y': 'RandomForest', 
-            'kidney_left_delta_z': 'Lasso',
+            'kidney_left_delta_y': 'GradientBoosting',
+            'kidney_left_delta_z': 'GradientBoosting',
             'kidney_right_delta_x': 'Ridge',
-            'kidney_right_delta_y': 'RandomForest',
-            'kidney_right_delta_z': 'GradientBoosting'
+            'kidney_right_delta_y': 'GradientBoosting',
+            'kidney_right_delta_z': 'GradientBoosting',
         }
         
         # Adaptive weights based on ensemble performance analysis
@@ -72,16 +83,16 @@ class AdaptiveEnsembleTrainer:
                 'GradientBoosting': 0.6
             },
             'kidney_left_delta_y': {
-                'RandomForest': 1.5,  # Best single model but weighted lower to prevent overfitting
-                'Lasso': 2.0,  # Increased weight for diversity
-                'Ridge': 1.2,
-                'GradientBoosting': 0.8
+                'RandomForest': 1.2,
+                'Lasso': 1.0,
+                'Ridge': 0.8,
+                'GradientBoosting': 2.2,
             },
             'kidney_left_delta_z': {
-                'RandomForest': 1.2,  # Lower weight due to ensemble degradation
-                'Lasso': 2.5,  # Best single model with highest weight
-                'Ridge': 1.0,
-                'GradientBoosting': 0.8
+                'RandomForest': 1.0,
+                'Lasso': 0.6,
+                'Ridge': 0.6,
+                'GradientBoosting': 2.8,
             },
             'kidney_right_delta_x': {
                 'RandomForest': 1.0,  # Lower weight due to ensemble degradation
@@ -90,17 +101,17 @@ class AdaptiveEnsembleTrainer:
                 'GradientBoosting': 0.6
             },
             'kidney_right_delta_y': {
-                'RandomForest': 1.5,  # Best single model but weighted lower to prevent overfitting
-                'Lasso': 1.2,
-                'Ridge': 1.0,
-                'GradientBoosting': 0.8
-            },
-            'kidney_right_delta_z': {
-                'RandomForest': 1.2,  # Lower weight due to ensemble degradation
+                'RandomForest': 1.2,
                 'Lasso': 1.0,
                 'Ridge': 0.8,
-                'GradientBoosting': 2.0  # Best single model with highest weight
-            }
+                'GradientBoosting': 2.2,
+            },
+            'kidney_right_delta_z': {
+                'RandomForest': 1.0,
+                'Lasso': 0.6,
+                'Ridge': 0.6,
+                'GradientBoosting': 2.8,
+            },
         }
     
     def load_integrated_data(self):
@@ -150,11 +161,25 @@ class AdaptiveEnsembleTrainer:
 
         df_enhanced = self._create_engineered_features(df.copy())
         df_enhanced = self._create_cross_features(df_enhanced)
+        df_enhanced = add_displacement_axis_features(df_enhanced)
+        df_enhanced = attach_projection_features(df_enhanced)
+        df_enhanced = add_projection_delta_proxies(df_enhanced)
 
         base_feature_cols = [col for col in self.required_features if col in df_enhanced.columns]
         engineered_feature_cols = [col for col in self.engineered_features if col in df_enhanced.columns]
         cross_feature_cols = [col for col in self.cross_features if col in df_enhanced.columns]
-        all_feature_cols = base_feature_cols + engineered_feature_cols + cross_feature_cols
+        axis_feature_cols = [col for col in self.displacement_axis_features if col in df_enhanced.columns]
+        projection_feature_cols = sorted(
+            c for c in df_enhanced.columns if c.startswith("proj_")
+        )
+        self.projection_features = projection_feature_cols
+        all_feature_cols = (
+            base_feature_cols
+            + engineered_feature_cols
+            + cross_feature_cols
+            + axis_feature_cols
+            + projection_feature_cols
+        )
 
         X = df_enhanced[all_feature_cols].astype(float).values
         y = df_enhanced[target_cols].astype(float).values
@@ -175,6 +200,9 @@ class AdaptiveEnsembleTrainer:
         df = normalize_dataframe(df)
         df_enhanced = self._create_engineered_features(df.copy())
         df_enhanced = self._create_cross_features(df_enhanced)
+        df_enhanced = add_displacement_axis_features(df_enhanced)
+        df_enhanced = attach_projection_features(df_enhanced)
+        df_enhanced = add_projection_delta_proxies(df_enhanced)
         for col in self.feature_names:
             if col not in df_enhanced.columns:
                 df_enhanced[col] = np.nan
@@ -237,6 +265,16 @@ class AdaptiveEnsembleTrainer:
         if out_train[0] is None:
             return None, None, None, None
         X_train_raw, y_train, feature_cols_train, target_cols_train = out_train
+
+        if "sample_weight" in train_df.columns:
+            self.train_sample_weights = (
+                pd.to_numeric(train_df["sample_weight"], errors="coerce")
+                .fillna(1.0)
+                .astype(float)
+                .values
+            )
+        else:
+            self.train_sample_weights = None
 
         out_val = self._build_feature_matrix(val_df)
         if out_val[0] is None:
@@ -463,125 +501,184 @@ class AdaptiveEnsembleTrainer:
         print(f"[FE] Cross-features creation completed. New shape: {df.shape}")
         return df
     
-    def load_base_models(self):
-        """Load base models with optimal parameters"""
+    def load_base_models(self, target_name: str | None = None):
+        """Load base models; Z/Y targets get huber/deeper configs."""
         print("\nLoading base models with optimal parameters...")
-        
-        models = {}
-        
-        # Use best parameters found during optimization
-        model_configs = {
-            'RandomForest': {
-                'n_estimators': 500,
-                'max_depth': 20,
-                'min_samples_split': 10,
-                'min_samples_leaf': 4,
-                'max_features': 'sqrt',
-                'random_state': 42,
-                'n_jobs': -1
-            },
-            'Lasso': {
-                'alpha': 0.1,
-                'max_iter': 5000,
-                'random_state': 42
-            },
-            'Ridge': {
-                'alpha': 1.0,
-                'solver': 'auto',
-                'random_state': 42
-            },
-            'GradientBoosting': {
-                'n_estimators': 500,
-                'learning_rate': 0.05,
-                'max_depth': 5,
-                'subsample': 0.8,
-                'random_state': 42
-            }
+        if target_name:
+            print(f"  Target profile: {target_name}")
+
+        axis = target_name.split("_")[-1] if target_name else None
+
+        rf_config = {
+            'n_estimators': 600 if axis in ('y', 'z') else 500,
+            'max_depth': 24 if axis in ('y', 'z') else 20,
+            'min_samples_split': 6 if axis in ('y', 'z') else 10,
+            'min_samples_leaf': 2 if axis in ('y', 'z') else 4,
+            'max_features': 'sqrt',
+            'random_state': 42,
+            'n_jobs': -1,
         }
-        
+        gbt_config = {
+            'n_estimators': 700 if axis == 'z' else 550,
+            'learning_rate': 0.04 if axis in ('y', 'z') else 0.05,
+            'max_depth': 7 if axis == 'z' else 6,
+            'subsample': 0.85,
+            'random_state': 42,
+        }
+        if axis == 'z':
+            gbt_config['loss'] = 'huber'
+            gbt_config['alpha'] = 0.9
+
+        model_configs = {
+            'RandomForest': rf_config,
+            'Lasso': {'alpha': 0.08 if axis in ('y', 'z') else 0.1, 'max_iter': 5000, 'random_state': 42},
+            'Ridge': {'alpha': 0.8 if axis in ('y', 'z') else 1.0, 'solver': 'auto', 'random_state': 42},
+            'GradientBoosting': gbt_config,
+        }
+
+        models = {}
         for model_name, config in model_configs.items():
             if model_name == 'RandomForest':
-                model = RandomForestRegressor(**config)
-                model.random_state = 42  # Явная установка random_state
-                models[model_name] = model
+                models[model_name] = RandomForestRegressor(**config)
             elif model_name == 'Lasso':
                 models[model_name] = Lasso(**config)
             elif model_name == 'Ridge':
                 models[model_name] = Ridge(**config)
             elif model_name == 'GradientBoosting':
                 models[model_name] = GradientBoostingRegressor(**config)
-        
+
         return models
+
+    @staticmethod
+    def _per_target_sample_weights(
+        target_name: str,
+        y_target: np.ndarray,
+        base_weights: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Up-weight large |Y|/|Z| displacements so extremes are not ignored."""
+        abs_y = np.abs(np.asarray(y_target, dtype=float).reshape(-1))
+        axis = target_name.split("_")[-1]
+        if axis == "z":
+            boost = 1.0 + np.clip(abs_y / 15.0, 0.0, 2.5)
+        elif axis == "y":
+            boost = 1.0 + np.clip(abs_y / 12.0, 0.0, 1.8)
+        else:
+            boost = np.ones_like(abs_y)
+        if base_weights is not None:
+            return np.asarray(base_weights, dtype=float).reshape(-1) * boost
+        return boost
     
-    def optimize_ensemble_weights(self, models, X_train, y_train, X_val, y_val, target_name):
+    @staticmethod
+    def _sanitize_predictions(pred: np.ndarray, fallback: float) -> np.ndarray:
+        out = np.asarray(pred, dtype=float).reshape(-1)
+        bad = ~np.isfinite(out)
+        if bad.any():
+            out = out.copy()
+            out[bad] = fallback
+        return out
+
+    @staticmethod
+    def _fit_kwargs_for_model(model_name: str, sample_weight: np.ndarray | None) -> dict:
+        if sample_weight is None:
+            return {}
+        if model_name in {"RandomForest", "GradientBoosting"}:
+            return {"sample_weight": sample_weight}
+        return {}
+
+    def optimize_ensemble_weights(
+        self, models, X_train, y_train, X_val, y_val, target_name, sample_weight=None
+    ):
         """Оптимизация весов ансамбля с помощью scipy.optimize"""
         print(f"\n[FE] Optimizing ensemble weights for {target_name}...")
-        
-        # Получаем предсказания каждой модели на валидационном наборе
+
+        fallback = float(np.nanmedian(y_train)) if len(y_train) else 0.0
+        if not np.isfinite(fallback):
+            fallback = 0.0
+
         model_predictions = {}
         for model_name, model in models.items():
-            # Создаем копию модели для оптимизации весов
             model_copy = self._copy_model(model)
-            model_copy.fit(X_train, y_train)
-            pred = model_copy.predict(X_val)
+            fit_kwargs = self._fit_kwargs_for_model(model_name, sample_weight)
+            try:
+                model_copy.fit(X_train, y_train, **fit_kwargs)
+                pred = self._sanitize_predictions(model_copy.predict(X_val), fallback)
+            except Exception as exc:
+                print(f"  [WARN] {model_name} fit failed during weight search: {exc}")
+                pred = np.full(len(y_val), fallback, dtype=float)
             model_predictions[model_name] = pred
-        
+
         def objective_function(weights):
-            """Целевая функция для минимизации (MAE)"""
-            # Нормализуем веса чтобы сумма была 1
             weights = np.abs(weights) / np.sum(np.abs(weights))
-            
-            # Взвешенное предсказание
             ensemble_pred = np.zeros(len(y_val))
-            for i, (model_name, pred) in enumerate(model_predictions.items()):
+            for i, pred in enumerate(model_predictions.values()):
                 ensemble_pred += weights[i] * pred
-            
-            # Возвращаем MAE
+            ensemble_pred = self._sanitize_predictions(ensemble_pred, fallback)
             return mean_absolute_error(y_val, ensemble_pred)
-        
-        # Начальные веса (равные)
+
         initial_weights = np.ones(len(models)) / len(models)
-        
-        # Ограничения: веса должны быть неотрицательными
         bounds = [(0, 1) for _ in range(len(models))]
-        
-        # Оптимизация
-        result = minimize(
-            objective_function,
-            initial_weights,
-            method='L-BFGS-B',
-            bounds=bounds,
-            options={'maxiter': 100}
-        )
-        
-        # Нормализуем оптимальные веса
-        optimal_weights = np.abs(result.x) / np.sum(np.abs(result.x))
-        
-        # Создаем словарь весов
-        optimized_weights = {}
-        for i, model_name in enumerate(models.keys()):
-            optimized_weights[model_name] = optimal_weights[i]
-        
+
+        try:
+            result = minimize(
+                objective_function,
+                initial_weights,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 100},
+            )
+            raw_w = np.abs(np.asarray(result.x, dtype=float))
+            denom = float(np.sum(raw_w))
+            if not np.isfinite(denom) or denom <= 0 or not np.all(np.isfinite(raw_w)):
+                raise ValueError("non-finite optimized weights")
+            optimal_weights = raw_w / denom
+        except Exception as exc:
+            print(f"  [WARN] Weight optimization failed, using adaptive priors: {exc}")
+            target_weights = self.adaptive_weights.get(target_name, {})
+            total = sum(target_weights.get(n, 1.0) for n in models.keys()) or len(models)
+            optimal_weights = np.array(
+                [target_weights.get(n, 1.0) / total for n in models.keys()],
+                dtype=float,
+            )
+
+        optimized_weights = {
+            model_name: float(optimal_weights[i])
+            for i, model_name in enumerate(models.keys())
+        }
         print(f"  [OK] Optimized weights: {optimized_weights}")
-        
-        # Сравниваем с равными весами
-        equal_weights = {name: 1.0/len(models) for name in models.keys()}
+
+        equal_weights = {name: 1.0 / len(models) for name in models.keys()}
         equal_pred = np.zeros(len(y_val))
-        for model_name, pred in model_predictions.items():
-            equal_pred += equal_weights[model_name] * pred
-        
         optimized_pred = np.zeros(len(y_val))
         for model_name, pred in model_predictions.items():
+            equal_pred += equal_weights[model_name] * pred
             optimized_pred += optimized_weights[model_name] * pred
-        
+        equal_pred = self._sanitize_predictions(equal_pred, fallback)
+        optimized_pred = self._sanitize_predictions(optimized_pred, fallback)
+
         equal_mae = mean_absolute_error(y_val, equal_pred)
         optimized_mae = mean_absolute_error(y_val, optimized_pred)
-        
-        improvement = ((equal_mae - optimized_mae) / equal_mae) * 100
-        print(f"  Improvement: {improvement:.1f}% (MAE: {equal_mae:.3f} -> {optimized_mae:.3f})")
-        
+        if equal_mae > 0:
+            improvement = ((equal_mae - optimized_mae) / equal_mae) * 100
+            print(f"  Improvement: {improvement:.1f}% (MAE: {equal_mae:.3f} -> {optimized_mae:.3f})")
+
         return optimized_weights
-    
+
+    def _fit_voting_ensemble(self, ensemble, X, y, sample_weight=None) -> None:
+        """Fit voting ensemble; sample_weight only on tree models (RF/GBT)."""
+        if sample_weight is None:
+            ensemble.fit(X, y)
+            return
+        named = getattr(ensemble, "named_estimators", None)
+        if named is None:
+            ensemble.fit(X, y)
+            return
+        fitted = []
+        for name, est in named.items():
+            est_fitted = self._copy_model(est)
+            est_fitted.fit(X, y, **self._fit_kwargs_for_model(name, sample_weight))
+            fitted.append(est_fitted)
+        ensemble.estimators_ = fitted
+
     def _copy_model(self, model):
         """Создает копию модели с теми же параметрами (без обученного состояния).
 
@@ -601,11 +698,20 @@ class AdaptiveEnsembleTrainer:
         Estimators cloned to keep cross-target training fully isolated.
         """
         estimators = [(name, clone(models[name])) for name in models.keys()]
-        weights = [optimized_weights[name] for name in models.keys()]
+        weights = np.array([optimized_weights[name] for name in models.keys()], dtype=float)
+        if not np.all(np.isfinite(weights)) or float(weights.sum()) <= 0:
+            target_weights = self.adaptive_weights.get(target_name, {})
+            weights = np.array(
+                [target_weights.get(name, 1.0) for name in models.keys()],
+                dtype=float,
+            )
+            if float(weights.sum()) <= 0:
+                weights = np.ones(len(models), dtype=float)
+            weights = weights / weights.sum()
 
         return VotingRegressor(
             estimators=estimators,
-            weights=weights,
+            weights=weights.tolist(),
             n_jobs=1,
         )
 
@@ -637,13 +743,8 @@ class AdaptiveEnsembleTrainer:
             n_jobs=1,
         )
 
-    def evaluate_model_cv(self, model, X_train, y_train, model_name):
-        """Evaluate model using cross-validation on a cloned estimator.
-
-        `sklearn.cross_val_score` internally clones the estimator, but we
-        clone here too so the caller's instance is provably never mutated
-        even if `cross_val_score` behavior changes in future sklearn.
-        """
+    def evaluate_model_cv(self, model, X_train, y_train, model_name, sample_weight=None):
+        """Evaluate model using cross-validation on a cloned estimator."""
         cv_scores = cross_val_score(
             clone(model),
             X_train,
@@ -657,21 +758,44 @@ class AdaptiveEnsembleTrainer:
         print(f"  {model_name} CV MAE: {cv_mae:.3f} +/- {cv_std:.3f}")
         return cv_mae, cv_std
     
-    def train_and_evaluate_adaptive_ensembles(self, X_train, X_test, y_train, y_test):
+    def train_and_evaluate_adaptive_ensembles(
+        self, X_train, X_test, y_train, y_test, sample_weight=None
+    ):
         """Train and evaluate adaptive ensemble models with weight optimization"""
         print("\nTraining and evaluating adaptive ensemble models...")
+
+        weights = sample_weight
+        if weights is None:
+            weights = self.train_sample_weights
+        if weights is not None:
+            weights = np.asarray(weights, dtype=float).reshape(-1)
+            if len(weights) != len(y_train):
+                print(
+                    f"WARNING: sample_weight length {len(weights)} != train rows {len(y_train)}; "
+                    "ignoring weights."
+                )
+                weights = None
+            else:
+                print(
+                    f"Using sample_weight: min={weights.min():.3f}, "
+                    f"max={weights.max():.3f}, mean={weights.mean():.3f}"
+                )
         
-        # Load base models
-        base_models = self.load_base_models()
+        # Load base models per target (Z/Y tuned hyperparameters)
         
         results = {}
-        self._best_single_maes = {}  # Store actual CV results
-        self._optimized_weights = {}  # Store optimized weights
+        self._best_single_maes = {}
+        self._optimized_weights = {}
         
-        # Дополнительное разделение для валидации при оптимизации весов
-        X_train_main, X_val, y_train_main, y_val = train_test_split(
-            X_train, y_train, test_size=0.2, random_state=42
-        )
+        if weights is not None:
+            X_train_main, X_val, y_train_main, y_val, w_main, w_val = train_test_split(
+                X_train, y_train, weights, test_size=0.2, random_state=42
+            )
+        else:
+            X_train_main, X_val, y_train_main, y_val = train_test_split(
+                X_train, y_train, test_size=0.2, random_state=42
+            )
+            w_main = w_val = None
         
         print(f"Data split for optimization: Train={X_train_main.shape}, Val={X_val.shape}, Test={X_test.shape}")
         
@@ -682,33 +806,42 @@ class AdaptiveEnsembleTrainer:
             y_train_target = y_train_main[:, i]
             y_val_target = y_val[:, i]
             y_test_target = y_test[:, i]
+            w_target = self._per_target_sample_weights(target_name, y_train_target, w_main)
+
+            base_models = self.load_base_models(target_name)
             
-            # Оптимизация весов
             optimized_weights = self.optimize_ensemble_weights(
-                base_models, X_train_main, y_train_target, X_val, y_val_target, target_name
+                base_models,
+                X_train_main,
+                y_train_target,
+                X_val,
+                y_val_target,
+                target_name,
+                sample_weight=w_target,
             )
             self._optimized_weights[target_name] = optimized_weights
             
-            # Create ensembles
             optimized_ensemble = self.create_optimized_voting_ensemble(base_models, target_name, optimized_weights)
             adaptive_ensemble = self.create_adaptive_voting_ensemble(base_models, target_name)
             standard_ensemble = self.create_standard_voting_ensemble(base_models)
             
-            # Train ensembles on full training data
-            optimized_ensemble.fit(X_train_main, y_train_target)
-            adaptive_ensemble.fit(X_train_main, y_train_target)
-            standard_ensemble.fit(X_train_main, y_train_target)
+            fit_kwargs = {"sample_weight": w_target} if w_target is not None else {}
+            self._fit_voting_ensemble(optimized_ensemble, X_train_main, y_train_target, w_target)
+            self._fit_voting_ensemble(adaptive_ensemble, X_train_main, y_train_target, w_target)
+            self._fit_voting_ensemble(standard_ensemble, X_train_main, y_train_target, w_target)
             
-            # Сохраняем обученную оптимизированную модель
             self.trained_models[target_name] = optimized_ensemble
             
-            # CV evaluation of base models to get actual best single MAE
             print("  Base Models CV Performance:")
             best_single_mae = float('inf')
             for model_name in self.adaptive_weights[target_name].keys():
                 if model_name in base_models:
                     cv_mae, cv_std = self.evaluate_model_cv(
-                        base_models[model_name], X_train_main, y_train_target, model_name
+                        base_models[model_name],
+                        X_train_main,
+                        y_train_target,
+                        model_name,
+                        sample_weight=w_target,
                     )
                     # Track best single model MAE
                     if cv_mae < best_single_mae:
@@ -716,9 +849,31 @@ class AdaptiveEnsembleTrainer:
             self._best_single_maes[target_name] = best_single_mae
             
             # Predictions
-            optimized_pred = optimized_ensemble.predict(X_test)
-            adaptive_pred = adaptive_ensemble.predict(X_test)
-            standard_pred = standard_ensemble.predict(X_test)
+            fallback_pred = float(np.nanmedian(y_train_target)) if len(y_train_target) else 0.0
+            if not np.isfinite(fallback_pred):
+                fallback_pred = 0.0
+            optimized_pred = self._sanitize_predictions(
+                optimized_ensemble.predict(X_test), fallback_pred
+            )
+            adaptive_pred = self._sanitize_predictions(
+                adaptive_ensemble.predict(X_test), fallback_pred
+            )
+            standard_pred = self._sanitize_predictions(
+                standard_ensemble.predict(X_test), fallback_pred
+            )
+
+            use_adaptive = not np.all(np.isfinite(optimized_pred))
+            if not use_adaptive:
+                opt_r2 = r2_score(y_test_target, optimized_pred)
+                adp_r2 = r2_score(y_test_target, adaptive_pred)
+                use_adaptive = opt_r2 < 0 and adp_r2 > opt_r2
+            if use_adaptive:
+                print(
+                    f"  [INFO] Using adaptive ensemble for {target_name} "
+                    "(optimized unstable or worse than adaptive on test)"
+                )
+                self.trained_models[target_name] = adaptive_ensemble
+                optimized_pred = adaptive_pred.copy()
             
             # Metrics for optimized ensemble
             optimized_mae = mean_absolute_error(y_test_target, optimized_pred)

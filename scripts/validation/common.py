@@ -40,6 +40,7 @@ class PredictorBundle:
     scaler: StandardScaler
     models: Dict[str, object]
     imputer: Optional[Any] = None
+    left_z_calibrator: Optional[Any] = None
 
 
 def ensure_run_dirs(base_output_dir: Path, run_id: str) -> Path:
@@ -103,6 +104,7 @@ def build_or_load_predictor(
                 scaler=payload["scaler"],
                 models=payload["models"],
                 imputer=payload.get("imputer"),
+                left_z_calibrator=payload.get("left_z_calibrator"),
             )
             return bundle, train_df, eval_df
         except Exception as exc:
@@ -160,7 +162,17 @@ def predict_df(bundle: PredictorBundle, df: pd.DataFrame) -> pd.DataFrame:
     rows = {}
     for target_name, model in bundle.models.items():
         rows[target_name] = model.predict(X_scaled)
-    return pd.DataFrame(rows, index=df.index)
+    pred_df = pd.DataFrame(rows, index=df.index)
+
+    if bundle.left_z_calibrator is not None:
+        from src.models.left_z_calibrator import TARGET as LEFT_Z_TARGET
+
+        if LEFT_Z_TARGET in pred_df.columns:
+            pred_df[LEFT_Z_TARGET] = bundle.left_z_calibrator.transform(
+                df_norm,
+                pred_df[LEFT_Z_TARGET].values,
+            )
+    return pred_df
 
 
 def compute_regression_table(

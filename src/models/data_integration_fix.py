@@ -3,14 +3,18 @@
 Интеграция источников данных в Phase 1 train/validation CSV.
 
 Канонические входы (по умолчанию):
-  - data/vybor_unified_features.csv          — клинические пары supine/lateral (таргеты)
-  - data/train_displacement_dataset.csv        — Excel-таблица (доп. пациенты, без дублей Vybor)
+  - data/vybor_from_xlsx.csv                   — клинические пары supine/lateral из основного xlsx
+  - data/train_displacement_dataset.csv        — legacy поднабор 50 (не используется, если есть xlsx CSV)
   - data/dicom_medical_features.csv            — опционально, без таргетов
   - data/kits19_medical_grade_features.csv     — только reference-признаки (без таргетов в train)
 
 Режимы training_mode:
-  - labeled_only (по умолчанию): train/val только Vybor + Excel; KiTS19 не попадает в y
-  - all: legacy — все источники с полными таргетами в train (включая KiTS deltas)
+  - labeled_only (по умолчанию): train/val только Vybor; KiTS19/DICOM не в y
+  - all: legacy — все источники с полными таргетами в train (включая KiTS proxy deltas)
+  - harmonized_extended: Vybor (clinical) + гармонизированные KiTS19 (proxy δ) +
+    DICOM с teacher pseudo-δ; val только Vybor
+  - clinical_xlsx_extended: как harmonized_extended + sample_weight (clinical=1, KiTS=0.15, DICOM=0.08)
+  - clinical_xlsx_kits_impute_only: Vybor + DICOM pseudo в train; KiTS19 только median imputation
 
 Выход:
   - data/integrated_master_dataset.csv
@@ -46,12 +50,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DEFAULT_DICOM_PATH = REPO_ROOT / "data" / "dicom_medical_features.csv"
-DEFAULT_VYBOR_PATH = REPO_ROOT / "data" / "vybor_unified_features.csv"
+DEFAULT_VYBOR_PATH = REPO_ROOT / "data" / "vybor_from_xlsx.csv"
 DEFAULT_EXCEL_PATH_RESOLVED = REPO_ROOT / DEFAULT_EXCEL_PATH
 DEFAULT_KITS19_PATH = REPO_ROOT / "data" / "kits19_medical_grade_features.csv"
 PROCESSED_DIR = REPO_ROOT / "data" / "processed"
 
 LABELED_SOURCES = {"Vybor", "Excel"}
+EXTENDED_TRAIN_SOURCES = {"Vybor", "Excel", "KiTS19", "DICOMS"}
+EXTENDED_MODES = frozenset({"harmonized_extended", "clinical_xlsx_extended", "clinical_xlsx_kits_impute_only"})
+KITS_IMPUTE_ONLY_MODES = frozenset({"clinical_xlsx_kits_impute_only"})
+SAMPLE_WEIGHT_BY_QUALITY = {
+    "clinical": 1.0,
+    "proxy_kits": 0.08,
+    "pseudo_dicom": 0.06,
+}
 KITS_MEDIANS_PATH = PROCESSED_DIR / "kits19_feature_medians.json"
 
 
@@ -60,7 +72,7 @@ class DataIntegrationFix:
         self,
         dicom_path: Path | str | None = None,
         vybor_path: Path | str | None = None,
-        excel_path: Path | str | None = DEFAULT_EXCEL_PATH_RESOLVED,
+        excel_path: Path | str | None = None,
         kits19_path: Path | str | None = DEFAULT_KITS19_PATH,
         training_mode: str = "labeled_only",
         fill_sparse_from_kits: bool = True,
@@ -239,12 +251,19 @@ class DataIntegrationFix:
 
         parts: List[pd.DataFrame] = []
         if len(dicoms_norm) > 0:
-            parts.append(dicoms_norm.assign(source="DICOMS"))
-        parts.append(vybor_norm.assign(source="Vybor"))
+            dicom_part = dicoms_norm.assign(source="DICOMS")
+            if "label_quality" not in dicom_part.columns:
+                dicom_part["label_quality"] = "pseudo_dicom"
+            parts.append(dicom_part)
+        vybor_part = vybor_norm.assign(source="Vybor", label_quality="clinical")
+        parts.append(vybor_part)
         if len(excel_norm) > 0:
-            parts.append(excel_norm.assign(source="Excel"))
+            parts.append(excel_norm.assign(source="Excel", label_quality="clinical"))
         if kits19_norm is not None and len(kits19_norm) > 0:
-            parts.append(kits19_norm.assign(source="KiTS19"))
+            kits_part = kits19_norm.assign(source="KiTS19")
+            if "label_quality" not in kits_part.columns:
+                kits_part["label_quality"] = "proxy_kits"
+            parts.append(kits_part)
 
         master_df = pd.concat(parts, ignore_index=True)
         master_df = normalize_dataframe(master_df)
@@ -286,7 +305,75 @@ class DataIntegrationFix:
                     excluded,
                 )
             return selected
+        if self.training_mode == "harmonized_extended":
+            mask = trainable["source"].isin(EXTENDED_TRAIN_SOURCES)
+            selected = trainable[mask].copy()
+            logger.info(
+                "harmonized_extended: using %s labeled rows across %s",
+                len(selected),
+                selected["source"].value_counts().to_dict() if "source" in selected.columns else {},
+            )
+            return selected
+        if self.training_mode == "clinical_xlsx_extended":
+            mask = trainable["source"].isin(EXTENDED_TRAIN_SOURCES)
+            selected = trainable[mask].copy()
+            logger.info(
+                "clinical_xlsx_extended: using %s rows across %s",
+                len(selected),
+                selected["source"].value_counts().to_dict() if "source" in selected.columns else {},
+            )
+            return selected
+        if self.training_mode == "clinical_xlsx_kits_impute_only":
+            mask = trainable["source"].isin({"Vybor", "Excel", "DICOMS"})
+            selected = trainable[mask].copy()
+            logger.info(
+                "clinical_xlsx_kits_impute_only: train without KiTS19 rows (%s); "
+                "KiTS19 kept for median imputation only. sources=%s",
+                len(trainable) - len(selected),
+                selected["source"].value_counts().to_dict() if "source" in selected.columns else {},
+            )
+            return selected
         return trainable
+
+    @staticmethod
+    def _attach_sample_weights(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        if "label_quality" in out.columns:
+            out["sample_weight"] = out["label_quality"].map(SAMPLE_WEIGHT_BY_QUALITY).fillna(0.1)
+        elif "source" in out.columns:
+            source_weights = {
+                "Vybor": 1.0,
+                "Excel": 1.0,
+                "KiTS19": 0.15,
+                "DICOMS": 0.08,
+            }
+            out["sample_weight"] = out["source"].map(source_weights).fillna(0.1)
+        else:
+            out["sample_weight"] = 1.0
+        return out
+
+    def _split_harmonized_extended(
+        self, training_rows: pd.DataFrame, test_size: float = 0.2
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Clinical Vybor holdout for val; KiTS19 + pseudo-DICOM only in train."""
+        clinical = training_rows[training_rows["source"].isin(LABELED_SOURCES)].copy()
+        extra = training_rows[~training_rows["source"].isin(LABELED_SOURCES)].copy()
+        if len(clinical) < 5:
+            raise ValueError(
+                f"harmonized_extended needs >=5 Vybor rows, got {len(clinical)}"
+            )
+        clin_train, val_df = self._split_clinical_labeled(clinical, test_size=test_size)
+        train_df = normalize_dataframe(
+            pd.concat([clin_train, extra], ignore_index=True)
+        )
+        val_df = normalize_dataframe(val_df)
+        logger.info(
+            "harmonized_extended split: train=%s (extra=%s), val Vybor=%s",
+            len(train_df),
+            len(extra),
+            len(val_df),
+        )
+        return train_df, val_df
 
     def analyze_data_quality(self, df: pd.DataFrame) -> dict:
         """Анализ пропусков."""
@@ -345,7 +432,11 @@ class DataIntegrationFix:
         logger.info("Сохранение интегрированных данных...")
         PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-        master_path = REPO_ROOT / "data" / "integrated_master_dataset.csv"
+        master_path = (
+            REPO_ROOT / "data" / "integrated_master_dataset_harmonized.csv"
+            if self.training_mode in EXTENDED_MODES
+            else REPO_ROOT / "data" / "integrated_master_dataset.csv"
+        )
         master_df.to_csv(master_path, index=False)
         logger.info("Saved %s", master_path)
 
@@ -360,6 +451,10 @@ class DataIntegrationFix:
 
         if self.training_mode == "labeled_only":
             train_df, val_df = self._split_clinical_labeled(training_rows)
+        elif self.training_mode in EXTENDED_MODES:
+            train_df, val_df = self._split_harmonized_extended(training_rows)
+            if self.training_mode in {"clinical_xlsx_extended", "clinical_xlsx_kits_impute_only"}:
+                train_df = self._attach_sample_weights(train_df)
         else:
             train_list: List[pd.DataFrame] = []
             val_list: List[pd.DataFrame] = []
@@ -417,8 +512,12 @@ class DataIntegrationFix:
             "train_by_source": train_df["source"].value_counts().to_dict() if "source" in train_df.columns else {},
             "val_by_source": val_df["source"].value_counts().to_dict() if "source" in val_df.columns else {},
             "master_rows_by_source": master_df["source"].value_counts().to_dict(),
-            "kits_in_train": self.training_mode != "labeled_only",
-            "note": "labeled_only excludes KiTS19 displacement targets (no paired-position CT).",
+            "kits_in_train": self.training_mode not in {"labeled_only", *KITS_IMPUTE_ONLY_MODES},
+            "note": (
+                "labeled_only excludes KiTS19/DICOM displacement targets. "
+                "harmonized_extended / clinical_xlsx_extended add harmonized KiTS19 proxy δ "
+                "and DICOM teacher pseudo-δ (clinical_xlsx_extended applies sample_weight)."
+            ),
         }
         manifest_path = PROCESSED_DIR / "integration_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -444,9 +543,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Phase 1 data integration")
     parser.add_argument(
         "--mode",
-        choices=["labeled_only", "all"],
+        choices=["labeled_only", "all", "harmonized_extended", "clinical_xlsx_extended", "clinical_xlsx_kits_impute_only"],
         default="labeled_only",
-        help="labeled_only: Vybor+Excel only for train; all: legacy mixed sources",
+        help="labeled_only: Vybor; extended modes add DICOM pseudo; kits_impute_only excludes KiTS from train",
     )
     parser.add_argument("--no-kits-fill", action="store_true", help="Skip KiTS median imputation for Excel rows")
     parser.add_argument("--excel-path", type=Path, default=DEFAULT_EXCEL_PATH_RESOLVED)

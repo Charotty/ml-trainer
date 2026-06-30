@@ -89,12 +89,25 @@ def predict_targets(
     patient_data: Union[Mapping[str, object], pd.DataFrame],
 ) -> Dict[str, float]:
     """Full inference: normalize → engineer → imputer → scaler → per-target predict."""
+    from src.models.left_z_calibrator import TARGET as LEFT_Z_TARGET
+
     feature_names = model_data["feature_names"]
     X = build_inference_matrix(trainer, patient_data, feature_names=feature_names)
     X_scaled = apply_model_preprocessing(X, model_data)
     predictions: Dict[str, float] = {}
     for target_name, model in model_data["models"].items():
         predictions[target_name] = float(model.predict(X_scaled)[0])
+
+    calibrator = model_data.get("left_z_calibrator")
+    if calibrator is not None and LEFT_Z_TARGET in predictions:
+        if isinstance(patient_data, pd.DataFrame):
+            patient_df = patient_data
+        else:
+            patient_df = pd.DataFrame([dict(patient_data)])
+        predictions[LEFT_Z_TARGET] = calibrator.apply_scalar(
+            patient_df.iloc[0].to_dict(),
+            predictions[LEFT_Z_TARGET],
+        )
     return predictions
 
 
