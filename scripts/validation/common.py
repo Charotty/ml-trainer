@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.features.na_trend_features import NaTrendStore  # noqa: E402
 from src.features.phase1_schema import (  # noqa: E402
     BASE_FEATURES,
     TARGET_NAMES,
@@ -188,7 +189,15 @@ def predict_df(bundle: PredictorBundle, df: pd.DataFrame) -> pd.DataFrame:
         from adaptive_ensemble import AdaptiveEnsembleTrainer
         from src.features.pipeline import apply_model_preprocessing, build_inference_matrix
 
-        trainer = AdaptiveEnsembleTrainer()
+        trainer = AdaptiveEnsembleTrainer(
+            z_head=getattr(bundle, "z_head", "ensemble"),
+            enrichment_mode=getattr(bundle, "enrichment_mode", "projection"),
+            na_trend_store=(
+                NaTrendStore.from_dict(bundle.na_trend_store)
+                if getattr(bundle, "na_trend_store", None)
+                else None
+            ),
+        )
         X = build_inference_matrix(
             trainer, df_norm, feature_names=bundle.feature_names,
         )

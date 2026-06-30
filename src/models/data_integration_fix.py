@@ -15,6 +15,7 @@
     DICOM с teacher pseudo-δ; val только Vybor
   - clinical_xlsx_extended: как harmonized_extended + sample_weight (clinical=1, KiTS=0.15, DICOM=0.08)
   - clinical_xlsx_kits_impute_only: Vybor + DICOM pseudo в train; KiTS19 только median imputation
+  - proxy_weighted_extended: Vybor + KiTS19 proxy δ + DICOM pseudo-δ в train (weighted); val только Vybor
 
 Выход:
   - data/integrated_master_dataset.csv
@@ -60,6 +61,7 @@ LABELED_SOURCES = {"Vybor", "Excel"}
 PROXY_TARGET_SOURCES = frozenset({"KiTS19", "DICOMS"})
 EXTENDED_TRAIN_SOURCES = {"Vybor", "Excel", "KiTS19", "DICOMS"}
 EXTENDED_MODES = frozenset({"harmonized_extended", "clinical_xlsx_extended", "clinical_xlsx_kits_impute_only"})
+PROXY_TRAIN_MODES = frozenset({"proxy_weighted_extended"})
 KITS_IMPUTE_ONLY_MODES = frozenset({"clinical_xlsx_kits_impute_only"})
 DEPRECATED_EXTENDED_MODES = EXTENDED_MODES | frozenset({"all"})
 SAMPLE_WEIGHT_BY_QUALITY = {
@@ -289,7 +291,12 @@ class DataIntegrationFix:
 
         master_df = pd.concat(parts, ignore_index=True)
         master_df = normalize_dataframe(master_df)
-        master_df = self.strip_proxy_displacement_targets(master_df)
+        if self.training_mode not in PROXY_TRAIN_MODES:
+            master_df = self.strip_proxy_displacement_targets(master_df)
+        else:
+            logger.info(
+                "proxy_weighted_extended: keeping KiTS19/DICOM displacement columns in master"
+            )
         master_df = master_df.sort_values(["source", "source_id"], na_position="last")
 
         logger.info(
@@ -318,6 +325,14 @@ class DataIntegrationFix:
         return out
 
     def _select_training_rows(self, trainable: pd.DataFrame) -> pd.DataFrame:
+        if self.training_mode in PROXY_TRAIN_MODES:
+            logger.info(
+                "%s: %s trainable rows (clinical + KiTS proxy + DICOM pseudo)",
+                self.training_mode,
+                len(trainable),
+            )
+            return trainable.copy()
+
         if self.training_mode in DEPRECATED_EXTENDED_MODES - {"all"}:
             logger.warning(
                 "training_mode=%s is deprecated for regression: "
@@ -447,7 +462,7 @@ class DataIntegrationFix:
 
         master_path = (
             REPO_ROOT / "data" / "integrated_master_dataset_harmonized.csv"
-            if self.training_mode in EXTENDED_MODES
+            if self.training_mode in EXTENDED_MODES | PROXY_TRAIN_MODES
             else REPO_ROOT / "data" / "integrated_master_dataset.csv"
         )
         master_df.to_csv(master_path, index=False)
@@ -464,6 +479,9 @@ class DataIntegrationFix:
 
         if self.training_mode == "labeled_only":
             train_df, val_df = self._split_clinical_labeled(training_rows)
+        elif self.training_mode in PROXY_TRAIN_MODES:
+            train_df, val_df = self._split_harmonized_extended(training_rows)
+            train_df = self._attach_sample_weights(train_df)
         elif self.training_mode in EXTENDED_MODES:
             train_df, val_df = self._split_harmonized_extended(training_rows)
             if self.training_mode in {"clinical_xlsx_extended", "clinical_xlsx_kits_impute_only"}:
@@ -517,6 +535,16 @@ class DataIntegrationFix:
         with open(PROCESSED_DIR / "target_names.json", "w", encoding="utf-8") as fh:
             json.dump(list(TARGET_NAMES), fh, indent=2, ensure_ascii=False)
 
+        kits_in_train = bool(
+            self.training_mode in PROXY_TRAIN_MODES
+            and "source" in train_df.columns
+            and (train_df["source"] == "KiTS19").any()
+        )
+        dicom_in_train = bool(
+            self.training_mode in PROXY_TRAIN_MODES
+            and "source" in train_df.columns
+            and (train_df["source"] == "DICOMS").any()
+        )
         manifest = {
             "training_mode": self.training_mode,
             "labeled_sources": sorted(LABELED_SOURCES),
@@ -525,13 +553,19 @@ class DataIntegrationFix:
             "train_by_source": train_df["source"].value_counts().to_dict() if "source" in train_df.columns else {},
             "val_by_source": val_df["source"].value_counts().to_dict() if "source" in val_df.columns else {},
             "master_rows_by_source": master_df["source"].value_counts().to_dict(),
-            "kits_in_train": False,
-            "dicom_in_train": False,
-            "proxy_targets_stripped": True,
+            "kits_in_train": kits_in_train,
+            "dicom_in_train": dicom_in_train,
+            "proxy_targets_stripped": self.training_mode not in PROXY_TRAIN_MODES,
+            "sample_weights": self.training_mode in PROXY_TRAIN_MODES,
             "note": (
-                "Regression targets are clinical-only (Vybor/Excel paired supine+lateral). "
-                "KiTS19/DICOM rows remain in master for feature reference but proxy δ "
-                "columns are stripped and never used in train/val."
+                "proxy_weighted_extended: KiTS proxy + DICOM pseudo in train with down-weighted "
+                "sample_weight; validation is clinical Vybor holdout only."
+                if self.training_mode in PROXY_TRAIN_MODES
+                else (
+                    "Regression targets are clinical-only (Vybor/Excel paired supine+lateral). "
+                    "KiTS19/DICOM rows remain in master for feature reference but proxy δ "
+                    "columns are stripped and never used in train/val."
+                )
             ),
         }
         manifest_path = PROCESSED_DIR / "integration_manifest.json"
@@ -558,7 +592,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Phase 1 data integration")
     parser.add_argument(
         "--mode",
-        choices=["labeled_only", "all", "harmonized_extended", "clinical_xlsx_extended", "clinical_xlsx_kits_impute_only"],
+        choices=[
+            "labeled_only",
+            "all",
+            "harmonized_extended",
+            "clinical_xlsx_extended",
+            "clinical_xlsx_kits_impute_only",
+            "proxy_weighted_extended",
+        ],
         default="labeled_only",
         help="labeled_only: Vybor; extended modes add DICOM pseudo; kits_impute_only excludes KiTS from train",
     )

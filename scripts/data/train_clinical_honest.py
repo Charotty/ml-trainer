@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "scripts" / "validation"))
 from adaptive_ensemble import AdaptiveEnsembleTrainer  # noqa: E402
 from common import compute_regression_table, predict_df  # noqa: E402
 from src.data.xlsx_displacement_parser import DEFAULT_OUTPUT_CSV  # noqa: E402
+from src.features.na_trend_features import NaTrendStore  # noqa: E402
 from src.features.phase1_schema import TARGET_NAMES, normalize_dataframe  # noqa: E402
 from src.features.pipeline import apply_model_preprocessing, build_inference_matrix  # noqa: E402
 from src.models.z_calibrator_oof import SideZCalibrator, fit_calibrator_oof_gated  # noqa: E402
@@ -52,7 +53,8 @@ def _axis_summary(per_target: pd.DataFrame) -> dict[str, float]:
     return {axis: float(np.mean(vals)) for axis, vals in axes.items() if vals}
 
 
-def _make_bundle(trainer, left_cal, right_cal):
+def _make_bundle(trainer, left_cal, right_cal, na_trend_store=None):
+    store = na_trend_store if na_trend_store is not None else getattr(trainer, "na_trend_store", None)
     return type(
         "Bundle",
         (),
@@ -67,11 +69,18 @@ def _make_bundle(trainer, left_cal, right_cal):
             "right_z_calibrator": right_cal,
             "z_head": trainer.z_head,
             "z_driver_names": trainer.z_driver_names,
+            "enrichment_mode": getattr(trainer, "enrichment_mode", "projection"),
+            "na_trend_store": store.to_dict() if store is not None else None,
         },
     )()
 
 
-def evaluate_groupkfold_oof(df: pd.DataFrame, *, z_head: str = "ensemble") -> dict:
+def evaluate_groupkfold_oof(
+    df: pd.DataFrame,
+    *,
+    z_head: str = "ensemble",
+    na_trend_store: NaTrendStore | None = None,
+) -> dict:
     """OOF predictions with patient GroupKFold (honest protocol, step 7)."""
     name_col = "full_name" if "full_name" in df.columns else "case_id"
     groups = df[name_col].astype(str).values
@@ -81,7 +90,11 @@ def evaluate_groupkfold_oof(df: pd.DataFrame, *, z_head: str = "ensemble") -> di
     for train_idx, val_idx in gkf.split(df, df[TARGET_NAMES[0]], groups=groups):
         tr = df.iloc[train_idx].reset_index(drop=True)
         te = df.iloc[val_idx].reset_index(drop=True)
-        fold_trainer = AdaptiveEnsembleTrainer(z_head=z_head)
+        fold_trainer = AdaptiveEnsembleTrainer(
+            z_head=z_head,
+            enrichment_mode="na_trends",
+            na_trend_store=na_trend_store,
+        )
         X_tr, X_te, y_tr, y_te = fold_trainer.prepare_training_data_split(tr, te)
         g_tr = tr[name_col].astype(str).values
         fold_trainer.train_and_evaluate_adaptive_ensembles(
@@ -148,13 +161,20 @@ def main() -> int:
     run_id = f"clinical_honest_{z_head}_{date.today().strftime('%Y%m%d')}"
 
     subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "data" / "build_vybor_from_xlsx.py")],
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "data" / "build_vybor_from_xlsx.py"),
+            "--no-boku",
+        ],
         cwd=str(ROOT),
         check=True,
     )
     df = normalize_dataframe(pd.read_csv(DEFAULT_OUTPUT_CSV))
     df = df.dropna(subset=list(TARGET_NAMES), how="any").reset_index(drop=True)
     print(f"[data] clinical patients={len(df)}")
+
+    na_trends = NaTrendStore.fit()
+    print(f"[na_trends] {json.dumps(na_trends.describe(), ensure_ascii=False)}")
 
     spine_eq_com = all(
         np.allclose(df[f"spine_center_{a}"], df[f"body_com_{a}"], atol=1e-3)
@@ -166,7 +186,11 @@ def main() -> int:
     name_col = "full_name" if "full_name" in df.columns else "case_id"
     groups = df[name_col].astype(str).values
 
-    trainer = AdaptiveEnsembleTrainer(z_head=z_head)
+    trainer = AdaptiveEnsembleTrainer(
+        z_head=z_head,
+        enrichment_mode="na_trends",
+        na_trend_store=na_trends,
+    )
     dummy_val = df.iloc[:1].copy()
     X_train, X_val, y_train, y_val = trainer.prepare_training_data_split(df, dummy_val)
     print(f"[z] z_head={z_head}, drivers={len(trainer.z_driver_names)}")
@@ -201,9 +225,14 @@ def main() -> int:
         "right_z_calibrator": right_cal,
         "z_head": z_head,
         "z_driver_names": trainer.z_driver_names,
+        "enrichment_mode": "na_trends",
+        "na_trend_store": na_trends.to_dict(),
         "training_meta": {
             "clinical_only": True,
             "kits_dicom_excluded_from_targets": True,
+            "na_spine_na_boku": "cohort_trends_only",
+            "boku_volume_fill": False,
+            "projection_join_by_name": False,
             "leakage_features_excluded": True,
             "weight_tuning": "GroupKFold",
             "final_fit": "100pct_clinical_train",
@@ -214,12 +243,14 @@ def main() -> int:
     joblib.dump(payload, model_path)
     print(f"[OK] saved {model_path}")
 
-    oof_metrics = evaluate_groupkfold_oof(df, z_head=z_head)
+    oof_metrics = evaluate_groupkfold_oof(df, z_head=z_head, na_trend_store=na_trends)
     report = {
         "run_id": run_id,
         "model_path": str(model_path),
         "n_clinical": len(df),
         "feature_count": len(trainer.feature_names),
+        "na_trend_features": len(trainer.na_trend_feature_cols),
+        "na_trends": na_trends.describe(),
         "spine_equals_body_com": spine_eq_com,
         "calibrators": {
             "left": left_cal.describe() if left_cal else None,

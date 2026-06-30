@@ -32,6 +32,7 @@ from src.features.displacement_axis_features import (
     add_displacement_axis_features,
 )
 from src.features.leakage_safe import filter_model_features, is_leakage_feature
+from src.features.na_trend_features import NaTrendStore, attach_na_trend_features
 from src.features.projection_enrichment import (
     add_projection_delta_proxies,
     attach_projection_features,
@@ -47,8 +48,19 @@ from src.features.phase1_schema import (
 warnings.filterwarnings('ignore')
 
 class AdaptiveEnsembleTrainer:
-    def __init__(self, *, z_head: str = "ensemble"):
+    def __init__(
+        self,
+        *,
+        z_head: str = "ensemble",
+        enrichment_mode: str = "projection",
+        na_trend_store: NaTrendStore | None = None,
+    ):
         self.z_head = z_head  # "ensemble" | "quantile_v7"
+        # projection = legacy per-patient proj_lat/sup join (not for honest clinical)
+        # na_trends = cohort trends from na_spine + na_boku (production honest)
+        # none = skip auxiliary enrichment
+        self.enrichment_mode = enrichment_mode
+        self.na_trend_store = na_trend_store
         self.z_driver_names: list[str] = []
         self._X_train_imputed: np.ndarray | None = None
         self._X_val_imputed: np.ndarray | None = None
@@ -69,6 +81,7 @@ class AdaptiveEnsembleTrainer:
         self.displacement_axis_features = filter_model_features(list(DISPLACEMENT_AXIS_FEATURES))
         self.anatomical_features = list(ANATOMICAL_FEATURES)
         self.projection_features: list[str] = []
+        self.na_trend_feature_cols: list[str] = []
         self.target_columns = list(TARGET_NAMES)
         
         # Best models per target — Z/Y tuned for huber GBT / deeper RF
@@ -144,6 +157,15 @@ class AdaptiveEnsembleTrainer:
             return None, None, None
     
         
+    def _apply_aux_enrichment(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df
+        if self.enrichment_mode == "na_trends":
+            out = attach_na_trend_features(out, self.na_trend_store)
+        elif self.enrichment_mode == "projection":
+            out = attach_projection_features(out)
+            out = add_projection_delta_proxies(out)
+        return out
+
     def _build_feature_matrix(self, df):
         """Apply feature engineering and return (X, y, all_feature_cols, target_cols).
 
@@ -169,8 +191,7 @@ class AdaptiveEnsembleTrainer:
         df_enhanced = self._create_engineered_features(df.copy())
         df_enhanced = self._create_cross_features(df_enhanced)
         df_enhanced = add_displacement_axis_features(df_enhanced)
-        df_enhanced = attach_projection_features(df_enhanced)
-        df_enhanced = add_projection_delta_proxies(df_enhanced)
+        df_enhanced = self._apply_aux_enrichment(df_enhanced)
 
         base_feature_cols = [col for col in self.required_features if col in df_enhanced.columns]
         engineered_feature_cols = [col for col in self.engineered_features if col in df_enhanced.columns]
@@ -183,7 +204,12 @@ class AdaptiveEnsembleTrainer:
             c for c in df_enhanced.columns
             if c.startswith("proj_") and not is_leakage_feature(c)
         )
+        na_trend_feature_cols = sorted(
+            c for c in df_enhanced.columns
+            if c.startswith("na_pop_shift_") or c.startswith("na_sup_z_") or c.startswith("na_sup_pct_")
+        )
         self.projection_features = projection_feature_cols
+        self.na_trend_feature_cols = na_trend_feature_cols
         all_feature_cols = (
             base_feature_cols
             + engineered_feature_cols
@@ -191,6 +217,7 @@ class AdaptiveEnsembleTrainer:
             + axis_feature_cols
             + anatomical_cols
             + projection_feature_cols
+            + na_trend_feature_cols
         )
 
         X = df_enhanced[all_feature_cols].astype(float).values
@@ -213,8 +240,7 @@ class AdaptiveEnsembleTrainer:
         df_enhanced = self._create_engineered_features(df.copy())
         df_enhanced = self._create_cross_features(df_enhanced)
         df_enhanced = add_displacement_axis_features(df_enhanced)
-        df_enhanced = attach_projection_features(df_enhanced)
-        df_enhanced = add_projection_delta_proxies(df_enhanced)
+        df_enhanced = self._apply_aux_enrichment(df_enhanced)
         for col in self.feature_names:
             if col not in df_enhanced.columns:
                 df_enhanced[col] = np.nan
