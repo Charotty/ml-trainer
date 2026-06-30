@@ -41,6 +41,10 @@ class PredictorBundle:
     models: Dict[str, object]
     imputer: Optional[Any] = None
     left_z_calibrator: Optional[Any] = None
+    side_z_models: Optional[dict] = None
+    multitask_model: Optional[Any] = None
+    multitask_blend: Optional[dict] = None
+    quantile_model: Optional[Any] = None
 
 
 def ensure_run_dirs(base_output_dir: Path, run_id: str) -> Path:
@@ -105,6 +109,10 @@ def build_or_load_predictor(
                 models=payload["models"],
                 imputer=payload.get("imputer"),
                 left_z_calibrator=payload.get("left_z_calibrator"),
+                side_z_models=payload.get("side_z_models"),
+                multitask_model=payload.get("multitask_model"),
+                multitask_blend=payload.get("multitask_blend"),
+                quantile_model=payload.get("quantile_model"),
             )
             return bundle, train_df, eval_df
         except Exception as exc:
@@ -164,6 +172,17 @@ def predict_df(bundle: PredictorBundle, df: pd.DataFrame) -> pd.DataFrame:
         rows[target_name] = model.predict(X_scaled)
     pred_df = pd.DataFrame(rows, index=df.index)
 
+    side_z = getattr(bundle, "side_z_models", None)
+    if side_z:
+        from src.models.side_z_predictor import LEFT_Z, RIGHT_Z
+
+        left_m = side_z.get("left") if isinstance(side_z, dict) else getattr(side_z, "left", None)
+        right_m = side_z.get("right") if isinstance(side_z, dict) else getattr(side_z, "right", None)
+        if left_m is not None and getattr(left_m, "fitted_", False):
+            pred_df[LEFT_Z] = left_m.predict(X_scaled)
+        if right_m is not None and getattr(right_m, "fitted_", False):
+            pred_df[RIGHT_Z] = right_m.predict(X_scaled)
+
     if bundle.left_z_calibrator is not None:
         from src.models.left_z_calibrator import TARGET as LEFT_Z_TARGET
 
@@ -172,6 +191,15 @@ def predict_df(bundle: PredictorBundle, df: pd.DataFrame) -> pd.DataFrame:
                 df_norm,
                 pred_df[LEFT_Z_TARGET].values,
             )
+
+    if getattr(bundle, "multitask_model", None) is not None and getattr(
+        bundle.multitask_model, "fitted_", False
+    ):
+        blend = getattr(bundle, "multitask_blend", None) or {"z": 0.35, "xy": 0.15}
+        mt = bundle.multitask_model.predict(X_scaled)
+        for j, tgt in enumerate(bundle.target_names):
+            w = float(blend.get("z", 0.35)) if tgt.endswith("_z") else float(blend.get("xy", 0.15))
+            pred_df[tgt] = (1.0 - w) * pred_df[tgt].values + w * mt[:, j]
     return pred_df
 
 

@@ -12,12 +12,12 @@
 | # | Задача | Статус | Артефакты |
 |---|--------|--------|-----------|
 | 1 | Проекционное обогащение (boku/spine по `full_name_key`, без δ) | done | `src/features/projection_enrichment.py` |
-| 2 | KiTS19 только для imputation + сниженный вес DICOM | done | `clinical_xlsx_kits_impute_only` в `data_integration_fix.py` |
-| — | **COMMIT + PUSH** (чекпоинт перед 3–5) | required | — |
-| 3 | Отдельные модели `kidney_left_delta_z` / `kidney_right_delta_z` | pending | `src/models/side_z_predictor.py` |
-| 4 | Multitask (shared trunk + головы X/Y/Z) поверх Phase 1 признаков | pending | `models/phase1/multitask_displacement.py` |
-| 5 | Quantile prediction P10/P50/P90 для всех 6 таргетов | pending | `src/models/quantile_displacement.py` |
-| 6 | Скрипт обучения + валидация holdout | pending | `scripts/data/train_phase2_improved.py` |
+| 2 | KiTS19 только для imputation + сниженный вес DICOM | done | `clinical_xlsx_kits_impute_only` |
+| — | **COMMIT + PUSH** (чекпоинт перед 3–5) | done | `61c6505` |
+| 3 | Отдельные модели `kidney_left_delta_z` / `kidney_right_delta_z` | done | `src/models/side_z_predictor.py` |
+| 4 | Multitask (shared trunk + головы X/Y/Z) | done | `models/phase1/multitask_displacement.py` |
+| 5 | Quantile prediction P10/P50/P90 | done | `src/models/quantile_displacement.py` |
+| 6 | Скрипт обучения + валидация holdout | done | `scripts/data/train_phase2_improved.py` |
 
 ## Веса обучения (режим `clinical_xlsx_kits_impute_only`)
 
