@@ -151,6 +151,11 @@ def main() -> int:
         default=None,
         help="Output model path (default depends on --z-head)",
     )
+    parser.add_argument(
+        "--with-kits",
+        action="store_true",
+        help="Include KiTS19 cohort in na_trend features (experimental)",
+    )
     args = parser.parse_args()
     z_head = args.z_head
     model_path = args.model_path or (
@@ -173,7 +178,7 @@ def main() -> int:
     df = df.dropna(subset=list(TARGET_NAMES), how="any").reset_index(drop=True)
     print(f"[data] clinical patients={len(df)}")
 
-    na_trends = NaTrendStore.fit()
+    na_trends = NaTrendStore.fit(include_kits=args.with_kits)
     print(f"[na_trends] {json.dumps(na_trends.describe(), ensure_ascii=False)}")
 
     spine_eq_com = all(
@@ -231,6 +236,7 @@ def main() -> int:
             "clinical_only": True,
             "kits_dicom_excluded_from_targets": True,
             "na_spine_na_boku": "cohort_trends_only",
+            "kits_in_trends": na_trends.include_kits,
             "boku_volume_fill": False,
             "projection_join_by_name": False,
             "leakage_features_excluded": True,

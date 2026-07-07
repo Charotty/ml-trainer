@@ -205,8 +205,14 @@ class AdaptiveEnsembleTrainer:
             if c.startswith("proj_") and not is_leakage_feature(c)
         )
         na_trend_feature_cols = sorted(
-            c for c in df_enhanced.columns
-            if c.startswith("na_pop_shift_") or c.startswith("na_sup_z_") or c.startswith("na_sup_pct_")
+            c
+            for c in df_enhanced.columns
+            if c.startswith("na_pop_shift_")
+            or c.startswith("na_sup_z_")
+            or c.startswith("na_sup_pct_")
+            or c.startswith("kits_z_")
+            or c.startswith("kits_pct_")
+            or c.startswith("kits_cohort_median_")
         )
         self.projection_features = projection_feature_cols
         self.na_trend_feature_cols = na_trend_feature_cols

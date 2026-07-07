@@ -1,4 +1,4 @@
-# Virtual environment
+﻿# Virtual environment
 venv/
 
 # KITS19 dataset
@@ -27,6 +27,24 @@ models/*.joblib
 data/raw/
 data/processed/*.csv
 data/processed/*.json
+
+# Generated data artifacts (clinical/proxy pipelines)
+_audit_data.json
+data/harmonized/
+data/processed_proxy/
+data/integrated_master_dataset_harmonized.csv
+data/na_boku_full.bak.csv
+data/na_spine_full.csv
+data/vybor_from_xlsx.csv
+data/vybor_from_xlsx.manifest.json
+data/*.xlsx
+
+# Generated result artifacts
+results/_excel_*.json
+results/adaptive_ensemble_*_results.csv
+results/axis_train_log.txt
+results/dicom_snimki_extract_*.csv
+results/validation_runs/
 
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/
