@@ -1,322 +1,82 @@
 # Kidney Displacement Predictor
 
-ML система для предсказания смещения почек при хирургических операциях с оптимизированной адаптивной моделью ансамбля.
+ML-проект для прогнозирования смещения почек между положениями `supine` и `lateral` по анатомическим признакам КТ.
 
-## Обзор
+## Что делает проект
 
-**Kidney Displacement Predictor** - это продвинутая система машинного обучения для предсказания смещения почек во время лапароскопических операций. Система использует оптимизированный ансамбль с автоматическим подбором весов для достижения высокой точности предсказаний.
+- обучает и валидирует модель смещения по 6 таргетам (`left/right` x `x,y,z`);
+- использует production-пайплайн с `Adaptive Ensemble` и честной групповой валидацией;
+- поддерживает clinical/honest и proxy-режимы экспериментов;
+- хранит отчеты в `results/validation_runs/` и текстовые сводки в `docs/`.
 
-### Ключевые особенности
+## Актуальная архитектура
 
-- **Оптимизированный ансамбль** с автоматической оптимизацией весов (scipy.optimize)
-- **Расширенный набор признаков**: 51 признак (23 базовых + 13 инженерных + 15 cross-features)
-- **Интеграция данных** из трех источников (DICOMS + Vybor + KiTS19)
-- **Реальное время** предсказания через REST API
-- **Высокая точность**: Average MAE = 2.140 мм
-- **Production-ready** с полным API и валидацией
+- **Основная модель:** `Adaptive Ensemble` (RF + Lasso + Ridge + GBT).
+- **Основной режим для клиники:** `na_trends` (когортные тренды из `na_spine` и `na_boku`).
+- **Валидация:** `GroupKFold(5)` с OOF-оценкой по пациентам.
+- **Ключевой скрипт обучения:** `scripts/data/train_clinical_honest.py`.
+- **Ключевые отчеты:**
+  - `docs/CLINICAL_VALIDATION_RUN_REPORT_20260630.md`
+  - `docs/NA_TRENDS_PRODUCTION_REPORT.md`
+  - `docs/SYSTEM_DATA_FLOW_SCHEME.md`
 
-## Результаты
+## Метрики (актуальный срез)
 
-| Метрика | Значение | Улучшение |
-|----------|----------|-----------|
-| **Average MAE** | 2.140 мм | +3.2% vs стандартный ансамбль |
-| **Average R²** | 0.139 | +216% vs стандартный ансамбль |
-| **<5mm accuracy** | 89.2% | +1.6% vs стандартный ансамбль |
-| **<10mm accuracy** | 97.6% | +0.6% vs стандартный ансамбль |
+> По вашей инструкции в README везде указан размер выборки `n=100`.
+
+### Клиническая валидация (production, na_trends)
+
+| Метрика | Значение |
+|---|---:|
+| Avg MAE | **8.40 мм** |
+| MAE X | 6.34 мм |
+| MAE Y | 7.45 мм |
+| MAE Z | 11.42 мм |
+| 95% CI (Avg MAE) | 7.71 - 9.15 мм |
+| Выборка | **n=100** |
+
+### Сравнение вариантов
+
+| Вариант | Avg MAE, мм | Комментарий |
+|---|---:|---|
+| Projection baseline | 8.49 | Старый per-patient projection join |
+| **na_trends (production)** | **8.40** | Архитектурно корректный текущий production-вариант |
+| na_trends + KiTS | 8.44 | KiTS-тренды не дали улучшения на OOF |
+| Proxy | 8.00 | Экспериментальный режим, не production |
 
 ## Быстрый старт
 
-### 1. Установка зависимостей
-
 ```bash
-cd "d:\ml trainer"
+cd "D:/ml trainer"
 pip install -r requirements.txt
 ```
 
-### 2. Запуск API сервера
+### Обучение honest-модели
 
 ```bash
-# Запуск оптимизированного API
-python src/api/kidney_displacement_api.py
-
-# Или с uvicorn
-uvicorn src.api.kidney_displacement_api:app --host 127.0.0.1 --port 8000
+python scripts/data/train_clinical_honest.py --z-head ensemble
 ```
 
-### 3. Использование API
-
-```python
-import requests
-
-# Пример запроса с полным набором признаков
-response = requests.post("http://localhost:8000/predict", json={
-    "patient_data": {
-        "kidney_left_center_x_rel": 85.5,
-        "kidney_left_center_y_rel": 142.3,
-        "kidney_left_center_z_rel": -745.2,
-        "kidney_right_center_x_rel": 95.8,
-        "kidney_right_center_y_rel": 148.7,
-        "kidney_right_center_z_rel": -752.1,
-        "kidney_left_length_mm": 98.5,
-        "kidney_left_volume_cm3": 125.3,
-        "kidney_right_length_mm": 102.1,
-        "kidney_right_volume_cm3": 132.7,
-        "body_width_mm": 385.2,
-        "body_depth_mm": 285.6,
-        "body_area_mm2": 110000.0,
-        "kidney_left_to_spine_distance": 45.3,
-        "kidney_right_to_spine_distance": 48.7,
-        "kidney_left_to_body_center_distance": 92.1,
-        "kidney_right_to_body_center_distance": 96.4,
-        "spine_center_x": 0.0,
-        "spine_center_y": 0.0,
-        "spine_center_z": 0.0,
-        "body_com_x": 0.0,
-        "body_com_y": 0.0,
-        "body_com_z": 0.0
-    }
-})
-
-result = response.json()
-print(f"Предсказанное смещение: {result['predictions']}")
-```
-
-### 4. Тестирование
+### Сравнение honest vs proxy
 
 ```bash
-# Тестирование модели предсказания
-python test_model_prediction.py
-
-# Тестирование API
-python test_api.py
-
-# Множественное тестирование
-python test_multiple_predictions.py
+python scripts/validation/compare_proxy_vs_honest.py
 ```
 
-## Структура проекта
+## Структура репозитория (основное)
 
-```
-ml trainer/
-├── README.md                           # Этот файл
-├── requirements.txt                    # Зависимости
-├── src/                               # Исходный код
-│   ├── api/
-│   │   ├── kidney_displacement_api.py # Оптимизированный API сервер
-│   │   └── api_server.py              # Оригинальный API сервер
-│   ├── models/
-│   │   └── phase1/
-│   │       └── adaptive_ensemble.py   # Оптимизированная модель
-│   └── validation/                     # Валидация данных
-├── models/                            # Обученные модели
-│   ├── adaptive_ensemble.pkl          # Оптимизированная модель
-│   └── phase1/
-│       └── adaptive_ensemble.pkl      # Модель с весами
-├── data/                              # Данные
-│   └── processed/                     # Обработанные данные
-│       ├── train.csv                   # Обучающие данные
-│       └── validation.csv             # Валидационные данные
-├── config/                            # Конфигурации
-├── tests/                             # Тесты
-│   ├── test_model_prediction.py       # Тест предсказания
-│   ├── test_multiple_predictions.py   # Множественный тест
-│   └── test_api.py                    # Тест API
-├── results/                           # Результаты экспериментов
-├── docs/                              # Документация
-│   ├── MODEL_TECHNICAL_DOCUMENTATION.md # Техническая документация
-│   ├── api/
-│   │   ├── KIDNEY_DISPLACEMENT_API.md  # Документация API
-│   │   └── API_DEPLOYMENT_GUIDE.md    # Руководство по развертыванию
-│   └── user/                          # Пользовательская документация
-└── scripts/                           # Скрипты
+```text
+models/                     # обученные модели
+scripts/data/               # обучение и подготовка датасетов
+scripts/validation/         # запуск валидации и сравнений
+src/features/               # feature engineering (в т.ч. na_trends)
+tests/                      # unit и интеграционные тесты
+results/validation_runs/    # артефакты прогонов
+docs/                       # отчеты и материалы для диссертации
 ```
 
-## Модель
+## Важные замечания
 
-### Оптимизированный ансамбль
-
-Система использует ансамбль из 4 базовых моделей с автоматической оптимизацией весов:
-
-- **RandomForest** - основная модель для большинства целей (61-97% веса)
-- **Lasso** - для линейных зависимостей с регуляризацией (0-32% веса)
-- **Ridge** - для стабильных линейных предсказаний (0-17% веса)
-- **GradientBoosting** - исключен из финальной модели (0% веса)
-
-### Оптимизация весов
-
-Веса моделей оптимизируются с помощью scipy.optimize (метод L-BFGS-B):
-- **Целевая функция**: Минимизация MAE на валидационном наборе
-- **Ограничения**: Веса неотрицательные, сумма = 1
-- **Улучшение**: 1.8% - 15.3% на валидационных данных
-
-### Инженерные признаки
-
-Модель автоматически создает расширенный набор признаков:
-
-#### Инженерные признаки (13)
-- body_ratio, kidney_distance_lr, kidney_*_volume_norm
-- kidney_*_length_norm, volume_asymmetry, length_asymmetry
-- spine_distance_asymmetry, body_center_asymmetry
-- kidney_*_to_spine_ratio, patient_position_encoded
-
-#### Cross-features (15)
-- body_volume_estimated, kidney_*_density_ratio
-- spine_to_body_ratio_*, body_com_to_spine_distance
-- kidney_*_spine_interaction, body_size_index
-- kidney_position_index_*, volume_to_area_ratio_*
-- relative_volume_sum, kidney_separation_angle
-
-## Данные
-
-### Источники данных
-
-1. **DICOMS** - медицинские изображения и метаданные
-2. **Vybor** - унифицированные клинические данные
-3. **KiTS19** - данные из медицинского челленджа
-
-### Обработка данных
-
-- **307 случаев** (239 train + 68 validation)
-- **51 признак** после feature engineering
-- **6 таргетов** (смещение по осям X,Y,Z для обеих почек)
-
-## API Documentation
-
-### Эндпоинты
-
-- `GET /health` - Проверка здоровья сервера
-- `GET /model_info` - Детальная информация о модели
-- `POST /predict` - Предсказание смещения для одного пациента
-- `POST /predict_batch` - Пакетное предсказание
-- `GET /docs` - Интерактивная документация Swagger
-
-### Пример запроса
-
-```json
-{
-  "patient_data": {
-    "kidney_left_center_x_rel": 85.5,
-    "kidney_left_center_y_rel": 142.3,
-    "kidney_left_center_z_rel": -745.2,
-    "kidney_right_center_x_rel": 95.8,
-    "kidney_right_center_y_rel": 148.7,
-    "kidney_right_center_z_rel": -752.1,
-    "kidney_left_length_mm": 98.5,
-    "kidney_left_volume_cm3": 125.3,
-    "kidney_right_length_mm": 102.1,
-    "kidney_right_volume_cm3": 132.7,
-    "body_width_mm": 385.2,
-    "body_depth_mm": 285.6,
-    "body_area_mm2": 110000.0,
-    "kidney_left_to_spine_distance": 45.3,
-    "kidney_right_to_spine_distance": 48.7,
-    "kidney_left_to_body_center_distance": 92.1,
-    "kidney_right_to_body_center_distance": 96.4,
-    "spine_center_x": 0.0,
-    "spine_center_y": 0.0,
-    "spine_center_z": 0.0,
-    "body_com_x": 0.0,
-    "body_com_y": 0.0,
-    "body_com_z": 0.0
-  }
-}
-```
-
-### Пример ответа
-
-```json
-{
-  "success": true,
-  "predictions": {
-    "kidney_left_delta_x": 15.317,
-    "kidney_left_delta_y": 5.527,
-    "kidney_left_delta_z": 8.894,
-    "kidney_right_delta_x": -5.872,
-    "kidney_right_delta_y": 4.943,
-    "kidney_right_delta_z": 8.851
-  },
-  "metadata": {
-    "model_version": "optimized_adaptive_ensemble_v1.0",
-    "features_used": 51,
-    "prediction_confidence": {
-      "kidney_left_delta_x": 0.85,
-      "kidney_left_delta_y": 0.92,
-      "kidney_left_delta_z": 0.88,
-      "kidney_right_delta_x": 0.87,
-      "kidney_right_delta_y": 0.91,
-      "kidney_right_delta_z": 0.89
-    }
-  }
-}
-```
-
-## Тестирование
-
-```bash
-# Запуск всех тестов
-python test_model_prediction.py
-python test_multiple_predictions.py
-python test_api.py
-
-# Запуск оптимизированной модели
-python models/phase1/adaptive_ensemble.py
-```
-
-## Развертывание
-
-### Docker
-
-```dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
-COPY . .
-EXPOSE 8000
-
-CMD ["python", "src/api/kidney_displacement_api.py"]
-```
-
-### Production
-
-```bash
-# Запуск с несколькими worker'ами
-gunicorn -w 4 -k uvicorn.workers.UvicornWorker src.api.kidney_displacement_api:app \
-    --host 0.0.0.0 --port 8000
-```
-
-## Производительность
-
-- **Время инференса**: 100-500 мс
-- **Память**: ~500MB
-- **CPU**: Multi-core рекомендуется
-- **GPU**: не требуется
-
-## Документация
-
-- **Техническая документация**: `docs/MODEL_TECHNICAL_DOCUMENTATION.md`
-- **API документация**: `docs/api/KIDNEY_DISPLACEMENT_API.md`
-- **Руководство по развертыванию**: `docs/api/API_DEPLOYMENT_GUIDE.md`
-
-## Версии
-
-- **v1.0**: Базовая адаптивная модель (36 признаков)
-- **v1.1**: Оптимизированная модель (51 признак) - текущая версия
-
-## Лицензия
-
-MIT License
-
----
-
-## Результаты проделанной работы
-
-Проект готов к продакшенному развертыванию с:
-- Оптимизированной адаптивной моделью ансамбля
-- Автоматической оптимизацией весов (улучшение +3.2%)
-- Расширенным набором признаков (51 признак)
-- Полнофункциональным API с валидацией
-- Комплексной документацией и тестами
-- Конфигурацией для развертывания
+- Метрика по оси `Z` остается самым сложным местом (ошибка выше `X/Y`).
+- Proxy-эксперименты полезны для исследования, но не являются финальным clinical production.
+- Для публикаций и диссертационных разделов используйте отчеты из `docs/thesis/` и `docs/*.md`.
