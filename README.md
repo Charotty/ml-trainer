@@ -75,13 +75,12 @@ results/validation_runs/    # артефакты прогонов
 docs/                       # отчеты и материалы для диссертации
 ```
 
-## CT Workbench UI (в разработке)
+## CT Workbench UI
 
 Браузерный интерфейс для загрузки supine-МСКТ, QA признаков и ML-прогноза смещения почек.
 
 - Спецификация: [`frontend/docs/PRD.md`](frontend/docs/PRD.md)
-- Архитектура: [`frontend/docs/ARCHITECTURE.md`](frontend/docs/ARCHITECTURE.md)
-- Фичи и сценарии: [`frontend/docs/FEATURES_AND_SCENARIOS.md`](frontend/docs/FEATURES_AND_SCENARIOS.md)
+- Запуск: `python -m uvicorn src.api.ct_workbench_api:app --port 8010` → http://127.0.0.1:8010/
 
 ## Важные замечания
 

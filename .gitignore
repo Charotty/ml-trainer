@@ -38,6 +38,7 @@ data/na_spine_full.csv
 data/vybor_from_xlsx.csv
 data/vybor_from_xlsx.manifest.json
 data/*.xlsx
+data/cases/
 
 # Generated result artifacts
 results/_excel_*.json

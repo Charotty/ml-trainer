@@ -1,0 +1,120 @@
+"""Background extraction jobs for cases."""
+
+from __future__ import annotations
+
+import sys
+import threading
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.inference.extract_from_dicom import process_case  # noqa: E402
+
+from .features_service import build_features_from_base, extraction_row_to_base_features  # noqa: E402
+from .predictor import ProductionPredictor  # noqa: E402
+from .storage import CaseStorage  # noqa: E402
+
+_lock = threading.Lock()
+_running: set[str] = set()
+
+
+def is_analyze_running(case_id: str) -> bool:
+    with _lock:
+        return case_id in _running
+
+
+def run_analyze_job(
+    storage: CaseStorage,
+    case_id: str,
+    predictor: ProductionPredictor,
+    *,
+    fast: bool = True,
+) -> None:
+    with _lock:
+        if case_id in _running:
+            return
+        _running.add(case_id)
+
+    def _job() -> None:
+        try:
+            storage.update_meta(
+                case_id,
+                status="extracting",
+                progress_pct=15.0,
+                stage="prepare",
+                message="Preparing DICOM series",
+                error=None,
+            )
+            storage.log(case_id, "analyze job started")
+            dicom_dir = storage.dicom_dir(case_id)
+            if not any(dicom_dir.iterdir()):
+                raise FileNotFoundError("No DICOM files in case folder")
+
+            work_dir = storage.artifacts_dir(case_id) / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            storage.update_meta(case_id, progress_pct=30.0, stage="segmentation", message="Running extraction")
+
+            row = process_case(
+                dicom_dir,
+                work_dir=work_dir,
+                case_id=case_id,
+                canonical=True,
+                fast=fast,
+                device="auto",
+                keep_temp=True,
+            )
+            storage.write_json_artifact(case_id, "extraction_raw.json", row)
+            storage.log(case_id, f"extraction status={row.get('status')}")
+
+            storage.update_meta(case_id, progress_pct=70.0, stage="features", message="Building feature vector")
+            base_row = extraction_row_to_base_features(row)
+            base_out, all_features, coverage, missing = build_features_from_base(
+                base_row,
+                feature_names=list(predictor.payload["feature_names"]),
+                enrichment_mode=predictor.enrichment_mode(),
+                na_trend_store=predictor.payload.get("na_trend_store"),
+            )
+            storage.write_json_artifact(case_id, "base_features.json", base_out)
+            storage.write_json_artifact(
+                case_id,
+                "features.json",
+                {
+                    "all_features": all_features,
+                    "coverage_pct": coverage,
+                    "missing_features": missing,
+                },
+            )
+            storage.update_meta(
+                case_id,
+                status="features_ready",
+                progress_pct=100.0,
+                stage="done",
+                message=f"Features ready (coverage {coverage:.1f}%)",
+                coverage_pct=coverage,
+            )
+            storage.log(case_id, "analyze job completed")
+        except Exception as exc:
+            storage.update_meta(
+                case_id,
+                status="failed",
+                progress_pct=0.0,
+                stage="error",
+                message="Extraction failed",
+                error=str(exc),
+            )
+            storage.log(case_id, f"analyze job failed: {exc}")
+        finally:
+            with _lock:
+                _running.discard(case_id)
+
+    thread = threading.Thread(target=_job, daemon=True)
+    thread.start()
+
+
+def start_analyze(storage: CaseStorage, case_id: str, predictor: ProductionPredictor) -> bool:
+    if is_analyze_running(case_id):
+        return False
+    run_analyze_job(storage, case_id, predictor)
+    return True

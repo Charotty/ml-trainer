@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CT Workbench</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>CT Workbench</h1>
+    <p class="subtitle">Supine МСКТ → признаки → ML-прогноз смещения почек</p>
+    <div id="health" class="health">Проверка API…</div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>1. Новый кейс</h2>
+      <label>Метка пациента (опционально)
+        <input id="patientLabel" type="text" placeholder="case-001" />
+      </label>
+      <button id="btnCreate">Создать кейс</button>
+      <p id="caseInfo" class="muted"></p>
+    </section>
+
+    <section class="card">
+      <h2>2. Загрузка DICOM</h2>
+      <input id="dicomFile" type="file" accept=".zip,.dcm,application/zip" />
+      <button id="btnUpload" disabled>Загрузить</button>
+    </section>
+
+    <section class="card">
+      <h2>3. Анализ</h2>
+      <button id="btnAnalyze" disabled>Запустить extraction</button>
+      <div id="progress" class="progress hidden">
+        <div class="bar"><div id="progressBar" class="bar-fill"></div></div>
+        <p id="progressText" class="muted"></p>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>4. QA — ключевые признаки (мм)</h2>
+      <div id="qaForm" class="qa-grid"></div>
+      <button id="btnSaveQa" disabled>Сохранить правки</button>
+    </section>
+
+    <section class="card">
+      <h2>5. Прогноз</h2>
+      <button id="btnPredict" disabled>Прогноз</button>
+      <table id="predTable" class="hidden">
+        <thead><tr><th>Таргет</th><th>Δ, мм</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p id="coverage" class="muted"></p>
+    </section>
+
+    <section class="card">
+      <h2>6. Отчёт</h2>
+      <button id="btnReport" disabled>Скачать report.json</button>
+    </section>
+
+    <section class="card">
+      <h2>Кейсы</h2>
+      <button id="btnRefreshCases">Обновить список</button>
+      <ul id="caseList"></ul>
+    </section>
+  </main>
+
+  <footer>
+    <p class="disclaimer">Исследовательский инструмент. Не заменяет клинический протокол.</p>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
