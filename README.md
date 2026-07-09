@@ -75,6 +75,14 @@ results/validation_runs/    # артефакты прогонов
 docs/                       # отчеты и материалы для диссертации
 ```
 
+## CT Workbench UI (в разработке)
+
+Браузерный интерфейс для загрузки supine-МСКТ, QA признаков и ML-прогноза смещения почек.
+
+- Спецификация: [`frontend/docs/PRD.md`](frontend/docs/PRD.md)
+- Архитектура: [`frontend/docs/ARCHITECTURE.md`](frontend/docs/ARCHITECTURE.md)
+- Фичи и сценарии: [`frontend/docs/FEATURES_AND_SCENARIOS.md`](frontend/docs/FEATURES_AND_SCENARIOS.md)
+
 ## Важные замечания
 
 - Метрика по оси `Z` остается самым сложным местом (ошибка выше `X/Y`).
