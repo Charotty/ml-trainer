@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -10,11 +12,11 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.inference.extract_from_dicom import process_case  # noqa: E402
-
 from .features_service import build_features_from_base, extraction_row_to_base_features  # noqa: E402
 from .predictor import ProductionPredictor  # noqa: E402
 from .storage import CaseStorage  # noqa: E402
+
+_EXTRACTION_TIMEOUT_SEC = 3600
 
 _lock = threading.Lock()
 _running: set[str] = set()
@@ -56,15 +58,44 @@ def run_analyze_job(
             work_dir.mkdir(parents=True, exist_ok=True)
             storage.update_meta(case_id, progress_pct=30.0, stage="segmentation", message="Running extraction")
 
-            row = process_case(
-                dicom_dir,
-                work_dir=work_dir,
-                case_id=case_id,
-                canonical=True,
-                fast=fast,
-                device="auto",
-                keep_temp=True,
+            result_path = work_dir / "extraction_result.json"
+            cmd = [
+                sys.executable,
+                "-m",
+                "src.api.cases.extraction_runner",
+                "--dicom-dir",
+                str(dicom_dir),
+                "--work-dir",
+                str(work_dir),
+                "--case-id",
+                case_id,
+                "--output",
+                str(result_path),
+                "--device",
+                "cpu",
+            ]
+            if fast:
+                cmd.append("--fast")
+            proc = subprocess.run(
+                cmd,
+                cwd=str(REPO_ROOT),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_EXTRACTION_TIMEOUT_SEC,
             )
+            if proc.returncode != 0:
+                detail = ""
+                if result_path.exists():
+                    row = json.loads(result_path.read_text(encoding="utf-8"))
+                    err = row.get("error") or detail or f"exit code {proc.returncode}"
+                    raise RuntimeError(str(err))
+                if proc.returncode < 0 or proc.returncode > 255:
+                    raise RuntimeError(
+                        "Extraction process crashed during segmentation "
+                        f"(exit {proc.returncode}). {detail}".strip()
+                    )
+                raise RuntimeError(detail or f"Extraction failed with exit code {proc.returncode}")
+            row = json.loads(result_path.read_text(encoding="utf-8"))
             storage.write_json_artifact(case_id, "extraction_raw.json", row)
             storage.log(case_id, f"extraction status={row.get('status')}")
 

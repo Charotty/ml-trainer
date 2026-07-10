@@ -79,3 +79,8 @@ def test_create_case_and_predict_flow(client: TestClient, tmp_path: Path) -> Non
     report = client.get(f"/api/v1/cases/{case_id}/report.json")
     assert report.status_code == 200
     assert "disclaimer" in report.json()
+
+    pdf = client.get(f"/api/v1/cases/{case_id}/report.pdf")
+    assert pdf.status_code == 200
+    assert pdf.headers["content-type"] == "application/pdf"
+    assert pdf.content[:4] == b"%PDF"

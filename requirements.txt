@@ -19,6 +19,9 @@ httpx>=0.24.0
 # Data validation and serialization
 jsonschema>=4.0.0
 
+# DICOM → NIfTI conversion (CT Workbench extraction)
+dcm2niix>=1.0.20250506
+
 # Utilities
 pathlib
 sys

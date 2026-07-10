@@ -13,57 +13,101 @@
     <div id="health" class="health">Проверка API…</div>
   </header>
 
+  <div id="banner" class="banner hidden" role="alert"></div>
+  <div id="toastContainer" class="toast-container" aria-live="polite"></div>
+
   <main>
-    <section class="card">
-      <h2>1. Новый кейс</h2>
+    <section id="viewDashboard" class="card view-panel">
+      <div class="dashboard-header">
+        <h2>Кейсы</h2>
+        <div class="dashboard-actions">
+          <button id="btnNewCase" type="button">Новый кейс</button>
+          <button id="btnRefreshCases" type="button">Обновить</button>
+        </div>
+      </div>
+      <table id="caseTable" class="case-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Метка</th>
+            <th>Статус</th>
+            <th>Coverage</th>
+            <th>Дата</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="caseList"></tbody>
+      </table>
+    </section>
+
+    <div id="viewWorkflow" class="view-panel hidden">
+    <nav id="wizardNav" class="wizard-nav" aria-label="Шаги работы с кейсом">
+      <button type="button" id="btnBackToCases" class="wizard-back">← Кейсы</button>
+      <button type="button" class="wizard-tab active" data-step="upload">1. Загрузка</button>
+      <button type="button" class="wizard-tab" data-step="analyze">2. Анализ</button>
+      <button type="button" class="wizard-tab wizard-tab-locked" data-step="qa" disabled>3. QA</button>
+      <button type="button" class="wizard-tab wizard-tab-locked" data-step="predict" disabled>4. Прогноз</button>
+      <button type="button" class="wizard-tab wizard-tab-locked" data-step="report" disabled>5. Отчёт</button>
+    </nav>
+
+    <section id="stepUpload" class="card wizard-step" data-step="upload">
+      <h2>Загрузка DICOM</h2>
       <label>Метка пациента (опционально)
         <input id="patientLabel" type="text" placeholder="case-001" />
       </label>
-      <button id="btnCreate">Создать кейс</button>
+      <button id="btnCreate" type="button">Создать кейс</button>
       <p id="caseInfo" class="muted"></p>
+      <label class="file-label">Архив DICOM (.zip)
+        <input id="dicomFile" type="file" accept=".zip,.dcm,application/zip" />
+      </label>
+      <button id="btnUpload" type="button" disabled>Загрузить</button>
     </section>
 
-    <section class="card">
-      <h2>2. Загрузка DICOM</h2>
-      <input id="dicomFile" type="file" accept=".zip,.dcm,application/zip" />
-      <button id="btnUpload" disabled>Загрузить</button>
-    </section>
-
-    <section class="card">
-      <h2>3. Анализ</h2>
-      <button id="btnAnalyze" disabled>Запустить extraction</button>
-      <div id="progress" class="progress hidden">
+    <section id="stepAnalyze" class="card wizard-step hidden" data-step="analyze">
+      <h2>Анализ (extraction)</h2>
+      <button id="btnAnalyze" type="button" disabled>Запустить extraction</button>
+      <div id="progress" class="progress hidden" aria-live="polite" aria-atomic="true">
         <div class="bar"><div id="progressBar" class="bar-fill"></div></div>
         <p id="progressText" class="muted"></p>
       </div>
     </section>
 
-    <section class="card">
-      <h2>4. QA — ключевые признаки (мм)</h2>
-      <div id="qaForm" class="qa-grid"></div>
-      <button id="btnSaveQa" disabled>Сохранить правки</button>
+    <section id="stepQa" class="card wizard-step hidden" data-step="qa">
+      <h2>QA — ключевые признаки</h2>
+      <div id="qaForm" class="qa-form"></div>
+      <button id="btnSaveQa" type="button" disabled>Сохранить правки</button>
     </section>
 
-    <section class="card">
-      <h2>5. Прогноз</h2>
-      <button id="btnPredict" disabled>Прогноз</button>
+    <section id="stepPredict" class="card wizard-step hidden" data-step="predict">
+      <h2>Прогноз смещения почек</h2>
+      <div id="coverageBlock" class="coverage-block hidden">
+        <span id="coverageBadge" class="coverage-badge"></span>
+        <details id="missingDetails" class="missing-details hidden">
+          <summary>Недостающие признаки</summary>
+          <ul id="missingList"></ul>
+        </details>
+      </div>
+      <p id="coverageWarning" class="coverage-warning hidden" role="alert">
+        Покрытие признаков ниже 80%. Прогноз может быть ненадёжным.
+      </p>
+      <button id="btnPredict" type="button" disabled>Прогноз</button>
       <table id="predTable" class="hidden">
         <thead><tr><th>Таргет</th><th>Δ, мм</th></tr></thead>
         <tbody></tbody>
       </table>
-      <p id="coverage" class="muted"></p>
     </section>
 
-    <section class="card">
-      <h2>6. Отчёт</h2>
-      <button id="btnReport" disabled>Скачать report.json</button>
+    <section id="stepReport" class="card wizard-step hidden" data-step="report">
+      <h2>Отчёт</h2>
+      <p id="reportSummary" class="muted report-summary">Сформируйте отчёт после шага «Прогноз».</p>
+      <div id="reportPreview" class="report-preview hidden"></div>
+      <div class="report-actions">
+        <button id="btnReportPdf" type="button" disabled>Скачать PDF</button>
+        <button id="btnReport" type="button" class="secondary" disabled>Скачать JSON</button>
+      </div>
+      <p class="muted disclaimer-inline">Исследовательский инструмент. Не заменяет клинический протокол.</p>
     </section>
-
-    <section class="card">
-      <h2>Кейсы</h2>
-      <button id="btnRefreshCases">Обновить список</button>
-      <ul id="caseList"></ul>
-    </section>
+    </div>
   </main>
 
   <footer>

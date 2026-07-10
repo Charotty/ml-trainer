@@ -506,24 +506,24 @@ class AdaptiveEnsembleTrainer:
         
         # 6. Body size index
         if 'body_width_mm' in df.columns and 'body_depth_mm' in df.columns:
-            df['body_size_index'] = np.sqrt(df['body_width_mm']**2 + df['body_depth_mm']**2)
+            bw = pd.to_numeric(df['body_width_mm'], errors='coerce')
+            bd = pd.to_numeric(df['body_depth_mm'], errors='coerce')
+            df['body_size_index'] = np.sqrt(bw**2 + bd**2)
             print("  [OK] body_size_index created")
         
         # 7. Kidney position indices
         if all(col in df.columns for col in ['kidney_left_center_x_rel', 'kidney_left_center_y_rel', 'kidney_left_center_z_rel']):
-            df['kidney_position_index_left'] = np.sqrt(
-                df['kidney_left_center_x_rel']**2 + 
-                df['kidney_left_center_y_rel']**2 + 
-                df['kidney_left_center_z_rel']**2
-            )
+            lx = pd.to_numeric(df['kidney_left_center_x_rel'], errors='coerce')
+            ly = pd.to_numeric(df['kidney_left_center_y_rel'], errors='coerce')
+            lz = pd.to_numeric(df['kidney_left_center_z_rel'], errors='coerce')
+            df['kidney_position_index_left'] = np.sqrt(lx**2 + ly**2 + lz**2)
             print("  [OK] kidney_position_index_left created")
             
         if all(col in df.columns for col in ['kidney_right_center_x_rel', 'kidney_right_center_y_rel', 'kidney_right_center_z_rel']):
-            df['kidney_position_index_right'] = np.sqrt(
-                df['kidney_right_center_x_rel']**2 + 
-                df['kidney_right_center_y_rel']**2 + 
-                df['kidney_right_center_z_rel']**2
-            )
+            rx = pd.to_numeric(df['kidney_right_center_x_rel'], errors='coerce')
+            ry = pd.to_numeric(df['kidney_right_center_y_rel'], errors='coerce')
+            rz = pd.to_numeric(df['kidney_right_center_z_rel'], errors='coerce')
+            df['kidney_position_index_right'] = np.sqrt(rx**2 + ry**2 + rz**2)
             print("  [OK] kidney_position_index_right created")
         
         # 8. Volume to area ratios
@@ -542,11 +542,13 @@ class AdaptiveEnsembleTrainer:
         
         # 10. Kidney separation angle (упрощенный)
         if all(col in df.columns for col in ['kidney_left_center_x_rel', 'kidney_right_center_x_rel', 'kidney_left_center_y_rel', 'kidney_right_center_y_rel']):
-            # Вычисляем угол между векторами от центра к почкам
-            left_vector = np.array([df['kidney_left_center_x_rel'], df['kidney_left_center_y_rel']]).T
-            right_vector = np.array([df['kidney_right_center_x_rel'], df['kidney_right_center_y_rel']]).T
-            
-            # Вычисляем угол между векторами
+            lx = pd.to_numeric(df['kidney_left_center_x_rel'], errors='coerce')
+            ly = pd.to_numeric(df['kidney_left_center_y_rel'], errors='coerce')
+            rx = pd.to_numeric(df['kidney_right_center_x_rel'], errors='coerce')
+            ry = pd.to_numeric(df['kidney_right_center_y_rel'], errors='coerce')
+            left_vector = np.column_stack([lx, ly])
+            right_vector = np.column_stack([rx, ry])
+
             dot_product = np.sum(left_vector * right_vector, axis=1)
             norm_left = np.sqrt(np.sum(left_vector**2, axis=1))
             norm_right = np.sqrt(np.sum(right_vector**2, axis=1))

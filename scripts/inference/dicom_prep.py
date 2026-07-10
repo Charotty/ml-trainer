@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -312,15 +313,39 @@ def build_series_input_dir(
     return staging, staging
 
 
+def _dcm2niix_install_hint() -> str:
+    if sys.platform == "win32":
+        return "pip install dcm2niix (or add dcm2niix.exe to PATH)"
+    if sys.platform == "darwin":
+        return "brew install dcm2niix or pip install dcm2niix"
+    return "apt install dcm2niix or pip install dcm2niix"
+
+
 def find_dcm2niix_executable() -> Optional[str]:
     cmd = shutil.which("dcm2niix")
     if cmd:
         return cmd
-    scripts_dir = Path(sys.executable).resolve().parent / "Scripts"
-    for name in ("dcm2niix.exe", "dcm2niix"):
-        candidate = scripts_dir / name
-        if candidate.exists():
-            return str(candidate)
+
+    exe_parent = Path(sys.executable).resolve().parent
+    search_dirs = [exe_parent, exe_parent / "Scripts", exe_parent / "bin"]
+    for directory in search_dirs:
+        for name in ("dcm2niix.exe", "dcm2niix"):
+            candidate = directory / name
+            if candidate.exists():
+                return str(candidate)
+
+    try:
+        import dcm2niix as _dcm2niix_pkg
+
+        pkg_exe = Path(_dcm2niix_pkg.__file__).resolve().parent / "dcm2niix.exe"
+        if pkg_exe.exists():
+            return str(pkg_exe)
+        pkg_bin = pkg_exe.with_suffix("")
+        if pkg_bin.exists():
+            return str(pkg_bin)
+    except ImportError:
+        pass
+
     return None
 
 
@@ -334,7 +359,7 @@ def convert_dicom_to_nifti(
 ) -> Tuple[bool, List[Path], str]:
     dcm2niix_cmd = find_dcm2niix_executable()
     if not dcm2niix_cmd:
-        return False, [], "dcm2niix binary not found (install: apt install dcm2niix)"
+        return False, [], f"dcm2niix binary not found (install: {_dcm2niix_install_hint()})"
 
     output_folder.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -347,22 +372,28 @@ def convert_dicom_to_nifti(
         "-x", "n",
         str(dicom_folder),
     ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        return False, [], f"dcm2niix timeout ({timeout_seconds}s)"
-    except Exception as exc:
-        return False, [], str(exc)
+    last_err = ""
+    for attempt in range(2):
+        if attempt:
+            time.sleep(2)
+            shutil.rmtree(output_folder, ignore_errors=True)
+            output_folder.mkdir(parents=True, exist_ok=True)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            return False, [], f"dcm2niix timeout ({timeout_seconds}s)"
+        except Exception as exc:
+            return False, [], str(exc)
 
-    nifti_files = sorted(output_folder.glob("*.nii*"))
-    if result.returncode != 0 and not nifti_files:
-        err = (result.stderr or result.stdout or "dcm2niix failed").strip()
-        return False, [], err
+        nifti_files = sorted(output_folder.glob("*.nii*"))
+        if nifti_files:
+            return True, [str(p) for p in nifti_files], ""
 
-    if not nifti_files:
-        return False, [], "dcm2niix produced no NIfTI files"
+        last_err = (result.stderr or result.stdout or "dcm2niix failed").strip()
+        if result.returncode == 0:
+            return False, [], "dcm2niix produced no NIfTI files"
 
-    return True, [str(p) for p in nifti_files], ""
+    return False, [], last_err
 
 
 def pick_primary_ct_nifti(nifti_files: Sequence[Path | str]) -> Optional[Path]:

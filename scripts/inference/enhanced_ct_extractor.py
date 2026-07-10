@@ -1241,12 +1241,20 @@ def _add_unified_features(features: Dict[str, Optional[float]]) -> Dict[str, Opt
         
         if all(v is not None for v in [kidney_x, kidney_y, kidney_z, spine_x, spine_y, spine_z]):
             # Расстояние до позвоночника
-            dist_to_spine = np.sqrt((kidney_x - spine_x)**2 + (kidney_y - spine_y)**2 + (kidney_z - spine_z)**2)
+            dist_to_spine = np.sqrt(
+                (float(kidney_x) - float(spine_x)) ** 2
+                + (float(kidney_y) - float(spine_y)) ** 2
+                + (float(kidney_z) - float(spine_z)) ** 2
+            )
             unified_features[f'kidney_{side}_to_spine_distance'] = float(dist_to_spine)
         
         if all(v is not None for v in [kidney_x, kidney_y, kidney_z, body_com_x, body_com_y, body_com_z]):
             # Расстояние до центра масс тела
-            dist_to_body = np.sqrt((kidney_x - body_com_x)**2 + (kidney_y - body_com_y)**2 + (kidney_z - body_com_z)**2)
+            dist_to_body = np.sqrt(
+                (float(kidney_x) - float(body_com_x)) ** 2
+                + (float(kidney_y) - float(body_com_y)) ** 2
+                + (float(kidney_z) - float(body_com_z)) ** 2
+            )
             unified_features[f'kidney_{side}_to_body_center_distance'] = float(dist_to_body)
     
     return unified_features

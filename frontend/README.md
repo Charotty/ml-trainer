@@ -9,6 +9,7 @@
 | [docs/PRD.md](docs/PRD.md) | Product Requirements Document |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Архитектура, API, ML-интеграция |
 | [docs/FEATURES_AND_SCENARIOS.md](docs/FEATURES_AND_SCENARIOS.md) | Фичи F-xxx и сценарии US-xx |
+| [docs/UI_IMPROVEMENTS.md](docs/UI_IMPROVEMENTS.md) | Требуемые улучшения UI (ревью MVP) |
 
 ## Запуск (MVP)
 

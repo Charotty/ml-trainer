@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
 from .features_service import build_features_from_base, merge_base_features
 from .predictor import ProductionPredictor
+from .report_service import DISCLAIMER, build_report_dict
 from .schemas import (
     CaseListResponse,
     CaseStatusResponse,
@@ -25,11 +27,7 @@ from .schemas import (
 from .storage import CaseStorage
 from .worker import is_analyze_running, start_analyze
 
-DISCLAIMER = (
-    "Исследовательский инструмент. Не заменяет клинический протокол. "
-    "Прогноз основан на supine-МСКТ и production-модели Adaptive Ensemble (na_trends)."
-)
-
+from src.visualization.displacement_plots import build_case_report_pdf  # noqa: E402
 
 def create_cases_router(
     storage: CaseStorage,
@@ -149,11 +147,12 @@ def create_cases_router(
                 "overrides": body.overrides,
             },
         )
+        pred = get_predictor()
         base_out, all_features, coverage, missing = build_features_from_base(
             merged,
-            feature_names=list(predictor.payload["feature_names"]),
-            enrichment_mode=predictor.enrichment_mode(),
-            na_trend_store=predictor.payload.get("na_trend_store"),
+            feature_names=list(pred.payload["feature_names"]),
+            enrichment_mode=pred.enrichment_mode(),
+            na_trend_store=pred.payload.get("na_trend_store"),
         )
         storage.write_json_artifact(case_id, "base_features.json", base_out)
         storage.write_json_artifact(
@@ -193,23 +192,48 @@ def create_cases_router(
             feature_count=pred.feature_count(),
         )
 
+    @router.get("/{case_id}/prediction")
+    def get_prediction(case_id: str) -> Dict[str, Any]:
+        try:
+            storage.get_meta(case_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        prediction = storage.read_json_artifact(case_id, "prediction.json")
+        if not prediction:
+            raise HTTPException(status_code=404, detail="No prediction yet. Run predict first.")
+        return prediction
+
     @router.get("/{case_id}/report.json")
     def report_json(case_id: str) -> Dict[str, Any]:
         try:
-            meta = storage.get_meta(case_id)
+            storage.get_meta(case_id)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        report = {
-            "schema_version": "ct_workbench_report_v1",
-            "disclaimer": DISCLAIMER,
-            "meta": meta,
-            "base_features": storage.read_json_artifact(case_id, "base_features.json"),
-            "features": storage.read_json_artifact(case_id, "features.json"),
-            "prediction": storage.read_json_artifact(case_id, "prediction.json"),
-            "manual_overrides": get_features(case_id).manual_overrides,
-        }
+        report = build_report_dict(storage, case_id, features_view=get_features(case_id))
         storage.write_json_artifact(case_id, "report.json", report)
         storage.update_meta(case_id, status="reported")
         return report
+
+    @router.get("/{case_id}/report.pdf")
+    def report_pdf(case_id: str) -> FileResponse:
+        try:
+            storage.get_meta(case_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        prediction = storage.read_json_artifact(case_id, "prediction.json")
+        if not prediction:
+            raise HTTPException(status_code=400, detail="No prediction yet. Run predict first.")
+        report = build_report_dict(storage, case_id, features_view=get_features(case_id))
+        storage.write_json_artifact(case_id, "report.json", report)
+        pdf_path = storage.artifacts_dir(case_id) / "report.pdf"
+        build_case_report_pdf(report, pdf_path)
+        storage.update_meta(case_id, status="reported")
+        label = report.get("meta", {}).get("patient_label") or case_id[:8]
+        safe_label = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(label))
+        return FileResponse(
+            pdf_path,
+            media_type="application/pdf",
+            filename=f"ct_workbench_report_{safe_label}.pdf",
+        )
 
     return router
