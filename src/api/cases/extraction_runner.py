@@ -22,7 +22,7 @@ def main() -> int:
     parser.add_argument("--case-id", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--fast", action="store_true")
-    parser.add_argument("--device", default="cpu", choices=["auto", "cpu", "gpu"])
+    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "gpu"])
     parser.add_argument("--reuse-nifti", action="store_true")
     args = parser.parse_args()
 

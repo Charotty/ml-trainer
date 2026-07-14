@@ -156,6 +156,29 @@ def main() -> int:
         action="store_true",
         help="Include KiTS19 cohort in na_trend features (experimental)",
     )
+    parser.add_argument(
+        "--skip-vybor-build",
+        action="store_true",
+        help="Skip build_vybor_from_xlsx.py (use existing or pre-built vybor CSV)",
+    )
+    parser.add_argument(
+        "--vybor-csv",
+        type=Path,
+        default=None,
+        help="Clinical training CSV (default: data/vybor_from_xlsx.csv)",
+    )
+    parser.add_argument(
+        "--spine-csv",
+        type=Path,
+        default=None,
+        help="na_spine cohort CSV for na_trend features",
+    )
+    parser.add_argument(
+        "--boku-csv",
+        type=Path,
+        default=None,
+        help="na_boku cohort CSV for na_trend features",
+    )
     args = parser.parse_args()
     z_head = args.z_head
     model_path = args.model_path or (
@@ -165,20 +188,33 @@ def main() -> int:
     )
     run_id = f"clinical_honest_{z_head}_{date.today().strftime('%Y%m%d')}"
 
-    subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "data" / "build_vybor_from_xlsx.py"),
-            "--no-boku",
-        ],
-        cwd=str(ROOT),
-        check=True,
-    )
-    df = normalize_dataframe(pd.read_csv(DEFAULT_OUTPUT_CSV))
+    vybor_path = args.vybor_csv or DEFAULT_OUTPUT_CSV
+    if not args.skip_vybor_build:
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "data" / "build_vybor_from_xlsx.py"),
+                "--no-boku",
+            ],
+            cwd=str(ROOT),
+            check=True,
+        )
+    elif not vybor_path.exists():
+        raise FileNotFoundError(
+            f"--skip-vybor-build set but {vybor_path} missing. "
+            "Run scripts/data/build_vybor_from_csv.py first."
+        )
+    else:
+        print(f"[data] using existing {vybor_path}")
+    df = normalize_dataframe(pd.read_csv(vybor_path))
     df = df.dropna(subset=list(TARGET_NAMES), how="any").reset_index(drop=True)
     print(f"[data] clinical patients={len(df)}")
 
-    na_trends = NaTrendStore.fit(include_kits=args.with_kits)
+    na_trends = NaTrendStore.fit(
+        spine_path=args.spine_csv,
+        boku_path=args.boku_csv,
+        include_kits=args.with_kits,
+    )
     print(f"[na_trends] {json.dumps(na_trends.describe(), ensure_ascii=False)}")
 
     spine_eq_com = all(

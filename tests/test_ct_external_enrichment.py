@@ -7,6 +7,8 @@ import pandas as pd
 import pytest
 
 from src.features.ct_external_enrichment import (
+    ANATOMICAL_COLS,
+    SPAN_COLS,
     compute_anatomical_extras,
     compute_spans_from_upper_lower,
     enrich_external_ct_frame,
@@ -69,6 +71,46 @@ def test_anatomical_extras_from_rel():
     out = compute_anatomical_extras(df)
     assert out.loc[0, "kidney_left_supine_middle_x"] == pytest.approx(80.0)
     assert out.loc[0, "kidney_lr_sep_x"] == pytest.approx(40.0)
+
+
+CLINICAL_13 = SPAN_COLS + ANATOMICAL_COLS
+
+
+def test_build_features_from_base_fills_clinical_13():
+    from src.api.cases.features_service import build_features_from_base
+
+    sample = {
+        "spine_center_x": 100.0,
+        "spine_center_y": 50.0,
+        "spine_center_z": 30.0,
+        "body_com_x": 102.0,
+        "body_com_y": 52.0,
+        "body_com_z": 31.0,
+        "kidney_left_center_x_rel": -20.0,
+        "kidney_left_center_y_rel": 5.0,
+        "kidney_left_center_z_rel": 2.0,
+        "kidney_right_center_x_rel": 20.0,
+        "kidney_right_center_y_rel": 4.0,
+        "kidney_right_center_z_rel": 1.0,
+        "kidney_left_upper_y": 8.0,
+        "kidney_left_lower_y": 2.0,
+        "kidney_left_upper_z": 10.0,
+        "kidney_left_lower_z": 4.0,
+        "kidney_right_upper_y": 9.0,
+        "kidney_right_lower_y": 3.0,
+        "kidney_right_upper_z": 11.0,
+        "kidney_right_lower_z": 5.0,
+    }
+    _, all_features, coverage, missing = build_features_from_base(
+        sample,
+        feature_names=CLINICAL_13,
+        enrichment_mode="none",
+    )
+    assert missing == []
+    assert coverage == pytest.approx(100.0)
+    assert all_features["kidney_left_z_span_supine_mm"] == pytest.approx(6.0)
+    assert all_features["kidney_lr_sep_x"] == pytest.approx(40.0)
+    assert all_features["kidney_left_supine_middle_y"] == pytest.approx(55.0)
 
 
 @pytest.mark.skipif(not CLINICAL.exists() or not DICOM.exists(), reason="data missing")

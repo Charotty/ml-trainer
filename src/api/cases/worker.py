@@ -72,7 +72,7 @@ def run_analyze_job(
                 "--output",
                 str(result_path),
                 "--device",
-                "cpu",
+                "auto",
             ]
             if fast:
                 cmd.append("--fast")

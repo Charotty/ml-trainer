@@ -15,10 +15,30 @@ if str(REPO_ROOT) not in sys.path:
 sys.path.insert(0, str(REPO_ROOT / "models" / "phase1"))
 
 from adaptive_ensemble import AdaptiveEnsembleTrainer  # noqa: E402
+from src.features.ct_external_enrichment import (  # noqa: E402
+    SPAN_COLS,
+    compute_anatomical_extras,
+    compute_spans_from_upper_lower,
+    fill_clinical_drivers_from_reference,
+)
 from src.features.na_trend_features import NaTrendStore  # noqa: E402
 from src.features.phase1_schema import BASE_FEATURES, normalize_dataframe  # noqa: E402
 
 from .predictor import _json_safe, compute_feature_coverage  # noqa: E402
+
+CLINICAL_REFERENCE_PATH = REPO_ROOT / "data" / "vybor_from_xlsx.csv"
+
+_KIDNEY_POLE_PREFIXES = ("kidney_left_upper_", "kidney_left_lower_", "kidney_right_upper_", "kidney_right_lower_")
+
+
+def _apply_ct_enrichment(df: pd.DataFrame) -> pd.DataFrame:
+    out = compute_spans_from_upper_lower(df)
+    out = compute_anatomical_extras(out)
+    if CLINICAL_REFERENCE_PATH.exists() and any(
+        col not in out.columns or out[col].isna().all() for col in SPAN_COLS
+    ):
+        out = fill_clinical_drivers_from_reference(out, pd.read_csv(CLINICAL_REFERENCE_PATH))
+    return out
 
 
 def build_features_from_base(
@@ -29,7 +49,7 @@ def build_features_from_base(
     na_trend_store: Dict[str, Any] | None = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any], float, List[str]]:
     """Return base_features, all_features, coverage_pct, missing."""
-    df = normalize_dataframe(pd.DataFrame([base_row]))
+    df = _apply_ct_enrichment(normalize_dataframe(pd.DataFrame([base_row])))
     store = NaTrendStore.from_dict(na_trend_store) if na_trend_store else NaTrendStore.fit(include_kits=False)
     trainer = AdaptiveEnsembleTrainer(
         enrichment_mode=enrichment_mode,
@@ -59,4 +79,10 @@ def merge_base_features(
 def extraction_row_to_base_features(extracted: Dict[str, Any]) -> Dict[str, Any]:
     """Map extract_from_dicom row dict to canonical BASE_FEATURES where possible."""
     df = normalize_dataframe(pd.DataFrame([extracted]))
-    return {col: _json_safe(df[col].iloc[0]) for col in BASE_FEATURES if col in df.columns}
+    pole_cols = [
+        col
+        for col in df.columns
+        if any(col.startswith(prefix) for prefix in _KIDNEY_POLE_PREFIXES)
+    ]
+    cols = list(dict.fromkeys([*BASE_FEATURES, *pole_cols]))
+    return {col: _json_safe(df[col].iloc[0]) for col in cols if col in df.columns}
