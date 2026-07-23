@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import joblib
+import numpy as np
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -20,8 +22,39 @@ from common import PredictorBundle, predict_df  # noqa: E402
 from src.features.na_trend_features import NaTrendStore  # noqa: E402
 from src.features.phase1_schema import BASE_FEATURES, normalize_dataframe  # noqa: E402
 
-DEFAULT_MODEL_PATH = REPO_ROOT / "models" / "adaptive_ensemble_clinical_honest.pkl"
+def default_model_path() -> Path:
+    """Resolve production model path (``MODEL_PATH`` env overrides default)."""
+    env = os.environ.get("MODEL_PATH", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return REPO_ROOT / "models" / "adaptive_ensemble_clinical_honest.pkl"
+
+
+DEFAULT_MODEL_PATH = default_model_path()
 MODEL_ID = "adaptive_ensemble_clinical_honest"
+MAX_ABS_DELTA_MM = 80.0
+
+
+def assess_prediction_sanity(
+    predictions: Dict[str, float],
+    *,
+    max_abs_mm: float = MAX_ABS_DELTA_MM,
+) -> tuple[bool, List[str]]:
+    """Return (ok, warnings) for clinically implausible displacement magnitudes."""
+    warnings: List[str] = []
+    for name, value in predictions.items():
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            warnings.append(f"{name}: значение не является числом")
+            continue
+        if not np.isfinite(number):
+            warnings.append(f"{name}: нечисловое значение ({value})")
+        elif abs(number) > max_abs_mm:
+            warnings.append(
+                f"{name}: |Δ|={abs(number):.1f} мм превышает порог {max_abs_mm:.0f} мм"
+            )
+    return (len(warnings) == 0), warnings
 
 
 @dataclass
@@ -32,7 +65,7 @@ class ProductionPredictor:
 
     @classmethod
     def load(cls, model_path: Path | None = None) -> ProductionPredictor:
-        path = Path(model_path or DEFAULT_MODEL_PATH)
+        path = Path(model_path or default_model_path())
         if not path.exists():
             raise FileNotFoundError(
                 f"Production model not found: {path}. "

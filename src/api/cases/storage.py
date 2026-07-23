@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import uuid
 import zipfile
@@ -11,7 +12,17 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-CASES_ROOT = REPO_ROOT / "data" / "cases"
+
+
+def default_cases_root() -> Path:
+    """Resolve cases directory (``CASES_ROOT`` env overrides default)."""
+    env = os.environ.get("CASES_ROOT", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return REPO_ROOT / "data" / "cases"
+
+
+CASES_ROOT = default_cases_root()
 
 
 def _utc_now() -> str:
@@ -20,7 +31,7 @@ def _utc_now() -> str:
 
 class CaseStorage:
     def __init__(self, root: Path | None = None) -> None:
-        self.root = Path(root or CASES_ROOT)
+        self.root = Path(root or default_cases_root())
         self.root.mkdir(parents=True, exist_ok=True)
 
     def case_dir(self, case_id: str) -> Path:

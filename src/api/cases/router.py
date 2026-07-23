@@ -186,6 +186,9 @@ def create_cases_router(
             raise HTTPException(status_code=400, detail="No features. Run analyze or manual input first.")
         pred = _require_predictor()
         predictions = pred.predict_row(base)
+        from .predictor import assess_prediction_sanity
+
+        sanity_ok, warnings = assess_prediction_sanity(predictions)
         storage.write_json_artifact(
             case_id,
             "prediction.json",
@@ -194,6 +197,8 @@ def create_cases_router(
                 "model_id": pred.model_path.name,
                 "enrichment_mode": pred.enrichment_mode(),
                 "feature_count": pred.feature_count(),
+                "sanity_ok": sanity_ok,
+                "warnings": warnings,
             },
         )
         storage.update_meta(case_id, status="predicted")
@@ -202,6 +207,8 @@ def create_cases_router(
             model_id=pred.model_path.name,
             enrichment_mode=pred.enrichment_mode(),
             feature_count=pred.feature_count(),
+            sanity_ok=sanity_ok,
+            warnings=warnings,
         )
 
     @router.get("/{case_id}/prediction")

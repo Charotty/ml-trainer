@@ -79,12 +79,26 @@ def vector_norm(vec: np.ndarray) -> float:
 
 
 def quality_checks(delta_left: np.ndarray, delta_right: np.ndarray) -> Dict[str, bool]:
+    finite = bool(np.isfinite(delta_left).all() and np.isfinite(delta_right).all())
+    component_ok = bool(
+        finite
+        and np.max(np.abs(delta_left)) < 80
+        and np.max(np.abs(delta_right)) < 80
+    )
     checks = {
-        "left_delta_norm_lt_80": bool(vector_norm(delta_left) < 80),
-        "right_delta_norm_lt_80": bool(vector_norm(delta_right) < 80),
-        "left_right_x_have_opposite_sign": bool(np.sign(delta_left[0]) != np.sign(delta_right[0])),
-        "yz_magnitude_lt_xx2_left": bool(abs(delta_left[1]) + abs(delta_left[2]) < abs(delta_left[0]) * 2.0),
-        "yz_magnitude_lt_xx2_right": bool(abs(delta_right[1]) + abs(delta_right[2]) < abs(delta_right[0]) * 2.0),
+        "finite_values": finite,
+        "components_lt_80": component_ok,
+        "left_delta_norm_lt_80": bool(finite and vector_norm(delta_left) < 80),
+        "right_delta_norm_lt_80": bool(finite and vector_norm(delta_right) < 80),
+        "left_right_x_have_opposite_sign": bool(
+            finite and np.sign(delta_left[0]) != np.sign(delta_right[0])
+        ),
+        "yz_magnitude_lt_xx2_left": bool(
+            finite and abs(delta_left[1]) + abs(delta_left[2]) < abs(delta_left[0]) * 2.0 + 1e-9
+        ),
+        "yz_magnitude_lt_xx2_right": bool(
+            finite and abs(delta_right[1]) + abs(delta_right[2]) < abs(delta_right[0]) * 2.0 + 1e-9
+        ),
     }
     checks["all_passed"] = bool(all(checks.values()))
     return checks
@@ -93,6 +107,13 @@ def quality_checks(delta_left: np.ndarray, delta_right: np.ndarray) -> Dict[str,
 def quality_check_messages(checks: Mapping[str, bool]) -> list[str]:
     """Human-readable clinical notes for automatic sanity checks."""
     notes: list[str] = []
+    if not checks.get("finite_values", True):
+        notes.append("В прогнозе есть нечисловые значения — результат использовать нельзя.")
+    if not checks.get("components_lt_80", True):
+        notes.append(
+            "Одна или несколько компонент смещения превышают 80 мм — "
+            "возможна ошибка масштаба признаков или OOD-вход."
+        )
     if not checks.get("left_delta_norm_lt_80", True):
         notes.append("Суммарное смещение левой почки превышает 80 мм — проверьте исходные данные.")
     if not checks.get("right_delta_norm_lt_80", True):

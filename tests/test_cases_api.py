@@ -74,7 +74,10 @@ def test_create_case_and_predict_flow(client: TestClient, tmp_path: Path) -> Non
 
     pred = client.post(f"/api/v1/cases/{case_id}/predict")
     assert pred.status_code == 200
-    assert pred.json()["predictions"]["kidney_left_delta_z"] == 3.0
+    body = pred.json()
+    assert body["predictions"]["kidney_left_delta_z"] == 3.0
+    assert body["sanity_ok"] is True
+    assert body["warnings"] == []
 
     report = client.get(f"/api/v1/cases/{case_id}/report.json")
     assert report.status_code == 200

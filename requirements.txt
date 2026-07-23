@@ -1,37 +1,38 @@
-# Production Requirements for Kidney Displacement Predictor
-# Phase 1: Production-ready deployment
+# Production / CT Workbench requirements (CPU-friendly pins).
+# For WSL+GPU (GTX) use requirements-gpu-wsl.txt for torch/TotalSegmentator.
 
-# Core ML libraries
+# Core ML
 numpy>=1.21.0
 pandas>=1.3.0
-scikit-learn>=1.0.0
+scikit-learn>=1.0.0,<1.6
 joblib>=1.1.0
 scipy>=1.7.0
 matplotlib>=3.5.0
 reportlab>=4.0.0
 Pillow>=9.0.0
 
-# Web API (FastAPI instead of Flask)
+# Web API
 fastapi>=0.68.0
 uvicorn>=0.15.0
 pydantic>=1.8.0
 python-multipart>=0.0.5
 httpx>=0.24.0
 
-# Data validation and serialization
+# Validation / schema
 jsonschema>=4.0.0
 
-# DICOM → NIfTI conversion (CT Workbench extraction)
-dcm2niix>=1.0.20250506
+# DICOM / CT extraction stack
+pydicom>=2.3.0
+nibabel>=4.0.0
+dicom2nifti>=2.4.0
+SimpleITK>=2.2.0
+scikit-image>=0.19.0
+dcm2niix>=1.0.20211006
 
-# Utilities
-pathlib
-sys
+# Optional GPU segmentation (install CUDA torch separately for GPU)
+# TotalSegmentator>=2.0.0
+# torch  -> use requirements-gpu-wsl.txt on WSL
 
-# Testing (optional for production)
+# Testing
 pytest>=6.0.0
 pytest-cov>=3.0.0
-
-# Development tools (optional)
-black>=22.0.0
-flake8>=4.0.0

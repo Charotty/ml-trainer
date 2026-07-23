@@ -98,8 +98,9 @@ def extract_dicom_metadata(dicom_file: Path) -> Dict[str, Any]:
         metadata["patient_id"] = str(dcm.PatientID) if "PatientID" in dcm else None
         metadata["patient_name"] = str(dcm.PatientName) if "PatientName" in dcm else None
         if "PatientSex" in dcm:
-            sex = str(dcm.PatientSex)
-            metadata["sex"] = 1 if sex == "M" else 0 if sex == "F" else None
+            # Match excel_displacement_adapter / CLINICAL_DEMOGRAPHIC_FEATURES: M=1, F=2
+            sex = str(dcm.PatientSex).strip().upper()
+            metadata["sex"] = 1.0 if sex == "M" else 2.0 if sex == "F" else None
         if "PatientAge" in dcm:
             age_str = str(dcm.PatientAge).replace("Y", "").replace("y", "")
             try:

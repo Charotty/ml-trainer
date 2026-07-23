@@ -44,6 +44,8 @@ class PredictResponse(BaseModel):
     model_id: str
     enrichment_mode: str
     feature_count: int
+    sanity_ok: bool = True
+    warnings: List[str] = Field(default_factory=list)
 
 
 class CaseSummary(BaseModel):

@@ -5,10 +5,12 @@ import pytest
 
 from src.features.ct_geometry import (
     aggregate_body_at_z_band,
+    harmonize_ct_to_clinical_frame,
     kidney_features_from_mask,
     mask_extent_patient_mm,
     merge_spine_relative,
     patient_kidney_side,
+    sanitize_body_size_for_clinical_model,
 )
 
 
@@ -54,3 +56,32 @@ def test_aggregate_body_at_z_band():
     band = aggregate_body_at_z_band(metrics, 9.0, 21.0)
     assert band["body_width_mm"] == pytest.approx(210.0)
     assert band["body_depth_mm"] == pytest.approx(155.0)
+
+
+def test_harmonize_ct_to_clinical_frame_matches_train_scale():
+    # Komarov-like LPS centers: signed X, large vertebral-spine distances.
+    features = {
+        "kidney_left_center_x": -81.671,
+        "kidney_left_center_y": -8.884,
+        "kidney_left_center_z": -533.419,
+        "kidney_right_center_x": 62.671,
+        "kidney_right_center_y": 6.821,
+        "kidney_right_center_z": -555.032,
+        "body_width_mm": 121.0,
+        "body_depth_mm": 123.0,
+    }
+    out = harmonize_ct_to_clinical_frame(features)
+    assert out["kidney_left_to_spine_distance"] < 40.0
+    assert out["kidney_right_to_spine_distance"] < 40.0
+    assert abs(out["kidney_left_center_x_rel"]) < 20.0
+    assert abs(out["kidney_right_center_x_rel"]) < 20.0
+    assert out["feature_frame"] == "clinical_midpoint_unsigned_x"
+
+
+def test_sanitize_body_size_drops_fov_crop():
+    out = sanitize_body_size_for_clinical_model(
+        {"body_width_mm": 121.0, "body_depth_mm": 123.0, "body_area_mm2": 1.0}
+    )
+    assert out["body_width_mm"] is None
+    assert out["body_depth_mm"] is None
+    assert out["body_area_mm2"] is None

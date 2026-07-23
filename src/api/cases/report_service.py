@@ -21,6 +21,8 @@ def build_report_dict(
 ) -> Dict[str, Any]:
     meta = storage.get_meta(case_id)
     extraction = storage.read_json_artifact(case_id, "extraction_raw.json") or {}
+    prediction = storage.read_json_artifact(case_id, "prediction.json") or {}
+    pred_warnings = list(prediction.get("warnings") or [])
     return {
         "schema_version": "ct_workbench_report_v1",
         "disclaimer": DISCLAIMER,
@@ -28,6 +30,8 @@ def build_report_dict(
         "extraction": extraction,
         "base_features": storage.read_json_artifact(case_id, "base_features.json"),
         "features": storage.read_json_artifact(case_id, "features.json"),
-        "prediction": storage.read_json_artifact(case_id, "prediction.json"),
+        "prediction": prediction,
         "manual_overrides": features_view.manual_overrides,
+        "prediction_warnings": pred_warnings,
+        "sanity_ok": bool(prediction.get("sanity_ok", True)),
     }

@@ -171,6 +171,103 @@ def merge_spine_relative(
     return out
 
 
+def _finite(value: object) -> Optional[float]:
+    try:
+        out = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(out):
+        return None
+    return out
+
+
+def harmonize_ct_to_clinical_frame(features: Dict[str, Optional[float]]) -> Dict[str, Optional[float]]:
+    """Map CT LPS kidney centers to the Vybor/Excel clinical feature frame.
+
+    Training positions store each kidney's X as a lateral distance from the
+    mid-sagittal plane (both sides ~+70 mm), then form spine as the L/R
+    midpoint and relative centers as kidney−spine. Raw CT LPS uses a signed
+    axis (left negative / right positive) and a vertebral spine anchor, which
+    makes ``*_to_spine_distance`` ~15–25× larger than train. Converting X to
+    unsigned lateral distance before the midpoint encoding restores train-scale
+    relative features.
+    """
+    out = dict(features)
+    lx = _finite(out.get("kidney_left_center_x"))
+    ly = _finite(out.get("kidney_left_center_y"))
+    lz = _finite(out.get("kidney_left_center_z"))
+    rx = _finite(out.get("kidney_right_center_x"))
+    ry = _finite(out.get("kidney_right_center_y"))
+    rz = _finite(out.get("kidney_right_center_z"))
+    if None in (lx, ly, lz, rx, ry, rz):
+        return out
+
+    mid_x = 0.5 * (lx + rx)
+    mid_y = 0.5 * (ly + ry)
+    mid_z = 0.5 * (lz + rz)
+
+    left_sup = np.array([abs(lx - mid_x), ly - mid_y, lz - mid_z], dtype=float)
+    right_sup = np.array([abs(rx - mid_x), ry - mid_y, rz - mid_z], dtype=float)
+    spine = 0.5 * (left_sup + right_sup)
+    left_rel = left_sup - spine
+    right_rel = right_sup - spine
+
+    out["spine_center_x"] = float(spine[0])
+    out["spine_center_y"] = float(spine[1])
+    out["spine_center_z"] = float(spine[2])
+    out["kidney_left_center_x_rel"] = float(left_rel[0])
+    out["kidney_left_center_y_rel"] = float(left_rel[1])
+    out["kidney_left_center_z_rel"] = float(left_rel[2])
+    out["kidney_right_center_x_rel"] = float(right_rel[0])
+    out["kidney_right_center_y_rel"] = float(right_rel[1])
+    out["kidney_right_center_z_rel"] = float(right_rel[2])
+    out["kidney_left_to_spine_distance"] = float(np.linalg.norm(left_rel))
+    out["kidney_right_to_spine_distance"] = float(np.linalg.norm(right_rel))
+
+    # Body COM offsets mirror excel_displacement_adapter defaults when depth/width exist.
+    width = _finite(out.get("body_width_mm"))
+    depth = _finite(out.get("body_depth_mm"))
+    com_x_off = (width * 0.02) if width is not None else 0.0
+    com_y_off = (depth * 0.06) if depth is not None else 0.0
+    out["body_com_x"] = float(spine[0] + com_x_off)
+    out["body_com_y"] = float(spine[1] + com_y_off)
+    out["body_com_z"] = float(spine[2])
+    out["kidney_left_to_body_center_distance"] = float(
+        np.linalg.norm(left_sup - np.array([out["body_com_x"], out["body_com_y"], out["body_com_z"]]))
+    )
+    out["kidney_right_to_body_center_distance"] = float(
+        np.linalg.norm(right_sup - np.array([out["body_com_x"], out["body_com_y"], out["body_com_z"]]))
+    )
+    out["kidney_lr_sep_x"] = float(right_sup[0] - left_sup[0])
+    out["kidney_lr_sep_y"] = float(right_sup[1] - left_sup[1])
+    out["kidney_lr_sep_z"] = float(right_sup[2] - left_sup[2])
+    out["feature_frame"] = "clinical_midpoint_unsigned_x"
+    return out
+
+
+def sanitize_body_size_for_clinical_model(
+    features: Dict[str, Optional[float]],
+    *,
+    width_range: Tuple[float, float] = (200.0, 500.0),
+    depth_range: Tuple[float, float] = (140.0, 400.0),
+) -> Dict[str, Optional[float]]:
+    """Drop FOV-cropped CT body sizes that are outside the clinical train range."""
+    out = dict(features)
+    width = _finite(out.get("body_width_mm"))
+    depth = _finite(out.get("body_depth_mm"))
+    if width is not None and not (width_range[0] <= width <= width_range[1]):
+        out["body_width_mm"] = None
+        out["body_area_mm2"] = None
+    if depth is not None and not (depth_range[0] <= depth <= depth_range[1]):
+        out["body_depth_mm"] = None
+        out["body_area_mm2"] = None
+    width = _finite(out.get("body_width_mm"))
+    depth = _finite(out.get("body_depth_mm"))
+    if width is not None and depth is not None and _finite(out.get("body_area_mm2")) is None:
+        out["body_area_mm2"] = float(width * depth)
+    return out
+
+
 def aggregate_body_at_z_band(
     slice_metrics: List[Dict[str, float]],
     z_min: float,

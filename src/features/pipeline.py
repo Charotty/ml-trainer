@@ -26,6 +26,14 @@ from .phase1_schema import (
     validate_base_features,
 )
 
+# A model artifact trained with almost-constant columns can contain a
+# StandardScaler scale close to floating-point noise. Dividing a valid CT
+# value by it makes linear ensemble members produce astronomically large
+# displacements. These limits are inference guards; ordinary in-distribution
+# training values are unaffected.
+_MIN_SCALER_SCALE = 1e-6
+_MAX_ABS_SCALED_FEATURE = 12.0
+
 # Re-export for callers that import from pipeline only
 __all__ = [
     "SCHEMA_VERSION",
@@ -76,12 +84,31 @@ def apply_model_preprocessing(
     X: np.ndarray,
     model_data: Mapping[str, Any],
 ) -> np.ndarray:
-    """Apply persisted imputer (if any) and scaler from a saved ensemble pickle."""
+    """Apply persisted preprocessing safely for out-of-distribution CT inputs.
+
+    Near-constant training features contain no usable patient signal. Their
+    standardized value is fixed at zero instead of dividing by numerical
+    noise. Remaining standardized values are clipped to prevent an
+    out-of-distribution coordinate from dominating linear voters.
+    """
     imputer = model_data.get("imputer")
     if imputer is not None:
         X = imputer.transform(X)
     scaler = model_data["scaler"]
-    return scaler.transform(X)
+    X_scaled = scaler.transform(X)
+
+    scale = np.asarray(getattr(scaler, "scale_", []), dtype=float)
+    if scale.shape == (X_scaled.shape[1],):
+        near_constant = ~np.isfinite(scale) | (np.abs(scale) < _MIN_SCALER_SCALE)
+        if near_constant.any():
+            X_scaled[:, near_constant] = 0.0
+
+    return np.nan_to_num(
+        np.clip(X_scaled, -_MAX_ABS_SCALED_FEATURE, _MAX_ABS_SCALED_FEATURE),
+        nan=0.0,
+        posinf=_MAX_ABS_SCALED_FEATURE,
+        neginf=-_MAX_ABS_SCALED_FEATURE,
+    )
 
 
 def predict_targets(

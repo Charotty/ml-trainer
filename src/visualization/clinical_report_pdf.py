@@ -930,8 +930,12 @@ def _draw_page1(
         model_id=str(prediction_block.get("model_id") or "—"),
     )
 
-    # Compact notes
+    # Compact notes (geometry checks + API sanity warnings)
     notes = quality_check_messages(checks)
+    for warn in list(report.get("prediction_warnings") or [])[:3]:
+        text = str(warn).strip()
+        if text and text not in notes:
+            notes.append(text)
     if notes:
         box_h = 8 * mm + 4.2 * mm * min(len(notes), 3)
         c.setFillColor(CARD_BG)
