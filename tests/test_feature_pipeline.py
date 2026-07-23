@@ -15,7 +15,7 @@ from src.features.pipeline import (
     normalize_raw_features,
     print_canonical_flow,
 )
-from src.features.phase1_schema import BASE_FEATURES
+from src.features.phase1_schema import BASE_FEATURES, CLINICAL_DEMOGRAPHIC_FEATURES, TARGET_NAMES
 
 
 def test_normalize_raw_features_alias():
@@ -34,6 +34,24 @@ def test_build_inference_matrix_requires_feature_names():
     df = pd.DataFrame([row])
     with pytest.raises(RuntimeError, match="feature_names is empty"):
         build_inference_matrix(trainer, df)
+
+
+def test_build_feature_matrix_includes_clinical_demographics():
+    """Feature rework: sex/age/bmi/body_type from the Vybor xlsx must reach
+    the model's feature matrix, not just live unused in the CSV."""
+    sys.path.insert(0, str(ROOT / "models" / "phase1"))
+    from adaptive_ensemble import AdaptiveEnsembleTrainer
+
+    trainer = AdaptiveEnsembleTrainer(enrichment_mode="none")
+    row = {c: 1.0 for c in BASE_FEATURES}
+    row.update({t: 0.0 for t in TARGET_NAMES})
+    row.update(
+        {"sex": 1.0, "age": 45.0, "bmi": 24.5, "body_type": 0.0, "has_previous_surgery": 0.0}
+    )
+    df = pd.DataFrame([row, row])
+    _, _, all_feature_cols, _ = trainer._build_feature_matrix(df)
+    for col in CLINICAL_DEMOGRAPHIC_FEATURES:
+        assert col in all_feature_cols
 
 
 def test_print_canonical_flow(capsys):

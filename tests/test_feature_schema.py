@@ -12,7 +12,9 @@ if str(ROOT) not in sys.path:
 
 from src.features.phase1_schema import (
     BASE_FEATURES,
+    CLINICAL_DEMOGRAPHIC_FEATURES,
     ENGINEERED_FEATURES,
+    OPTIONAL_METADATA_COLUMNS,
     TARGET_NAMES,
     encode_patient_position,
     normalize_dataframe,
@@ -69,3 +71,18 @@ def test_schema_lists_match_training_contract():
     assert len(BASE_FEATURES) == 23
     assert len(ENGINEERED_FEATURES) == 13
     assert len(TARGET_NAMES) == 6
+
+
+def test_clinical_demographic_features_are_model_inputs_not_optional_metadata():
+    """sex/age/bmi/body_type must be real model inputs, not just optional
+    metadata — this is the feature-rework contract requested for the
+    dicexe/Vybor xlsx clinical/tabular columns."""
+    assert CLINICAL_DEMOGRAPHIC_FEATURES == [
+        "sex",
+        "age",
+        "bmi",
+        "body_type",
+        "has_previous_surgery",
+    ]
+    for col in CLINICAL_DEMOGRAPHIC_FEATURES:
+        assert col not in OPTIONAL_METADATA_COLUMNS

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-API сервер для предсказания смещения почек на основе оптимизированной адаптивной модели
+Canonical FastAPI kidney displacement prediction API.
+
+This is the production predict contract (``/predict``, ``/model_info``, …).
+Legacy Flask API: ``models/phase1/api_kidney_predictor.py`` (deprecated).
+AR / sensors workflow lives in ``src/api/api_server.py`` (different contract).
 """
 
 from fastapi import FastAPI, HTTPException
@@ -18,11 +22,22 @@ import logging
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'phase1'))
 from adaptive_ensemble import AdaptiveEnsembleTrainer
+from src.features.na_trend_features import NaTrendStore
 from src.features.pipeline import predict_targets
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Canonical production artifact (honest clinical training with na_trends).
+DEFAULT_MODEL_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "..",
+    "..",
+    "models",
+    "adaptive_ensemble_clinical_honest.pkl",
+)
+LEGACY_MODEL_NAME = "adaptive_ensemble.pkl"
 
 # Инициализация FastAPI
 app = FastAPI(
@@ -66,6 +81,22 @@ class PatientData(BaseModel):
         description="DICOM PatientPosition / scan_position (HFS, FFS, ...). "
         "Используется для patient_position_encoded при инжиниринге.",
     )
+    sex: Optional[float] = Field(
+        None,
+        description="Пол пациента, код (1.0 = М, 2.0 = Ж). Опционально — "
+        "при отсутствии импутируется медианой обучающей выборки.",
+    )
+    age: Optional[float] = Field(None, description="Возраст пациента, лет. Опционально.")
+    bmi: Optional[float] = Field(None, description="Индекс массы тела (BMI). Опционально.")
+    body_type: Optional[float] = Field(
+        None,
+        description="Тип телосложения, код (0=нормостеническое, 1=астеническое, "
+        "2=гиперстеническое). Опционально.",
+    )
+    has_previous_surgery: Optional[float] = Field(
+        None,
+        description="Были ли ранее операции (0/1). Опционально.",
+    )
 
 class PredictRequest(BaseModel):
     """Запрос на предсказание"""
@@ -99,17 +130,36 @@ def load_model():
     global model_data, trainer, feature_names
     
     try:
-        # Загрузка модели
-        model_path = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'adaptive_ensemble.pkl')
+        model_path = os.environ.get("MODEL_PATH", DEFAULT_MODEL_PATH)
+        if os.path.basename(model_path) == LEGACY_MODEL_NAME:
+            logger.warning(
+                "Using legacy model path '%s'. Prefer canonical "
+                "'models/adaptive_ensemble_clinical_honest.pkl'.",
+                model_path,
+            )
         model_data = joblib.load(model_path)
-        
-        # Инициализация тренера для создания признаков
-        trainer = AdaptiveEnsembleTrainer()
+
+        enrichment_mode = model_data.get("enrichment_mode", "projection")
+        store_payload = model_data.get("na_trend_store")
+        na_trend_store = (
+            NaTrendStore.from_dict(store_payload) if store_payload else None
+        )
+        trainer = AdaptiveEnsembleTrainer(
+            enrichment_mode=enrichment_mode,
+            na_trend_store=na_trend_store,
+            z_head=model_data.get("z_head", "ensemble"),
+        )
         
         feature_names = model_data['feature_names']
         trainer.feature_names = feature_names
 
-        logger.info(f"Модель успешно загружена. Признаков: {len(feature_names)}")
+        logger.info(
+            "Модель успешно загружена. Признаков: %s, enrichment_mode=%s, "
+            "na_trend_store=%s",
+            len(feature_names),
+            enrichment_mode,
+            na_trend_store is not None,
+        )
         return True
         
     except Exception as e:
@@ -177,6 +227,43 @@ async def health_check():
         "timestamp": datetime.now().isoformat()
     }
 
+def _performance_from_training_meta(payload: dict) -> dict:
+    """Prefer metrics stored in training_meta; never invent hardcoded MAE."""
+    meta = payload.get("training_meta")
+    if not isinstance(meta, dict):
+        return {
+            "status": "unavailable",
+            "average_mae_mm": None,
+            "average_r2": None,
+            "accuracy_5mm": None,
+            "accuracy_10mm": None,
+            "detail": "training_meta missing from model payload",
+        }
+
+    perf = meta.get("performance")
+    if isinstance(perf, dict) and any(
+        perf.get(k) is not None
+        for k in ("average_mae_mm", "mae_avg_mm", "average_r2", "r2_avg")
+    ):
+        return {
+            "status": "from_training_meta",
+            "average_mae_mm": perf.get("average_mae_mm", perf.get("mae_avg_mm")),
+            "average_r2": perf.get("average_r2", perf.get("r2_avg")),
+            "accuracy_5mm": perf.get("accuracy_5mm", perf.get("within_5mm_ratio")),
+            "accuracy_10mm": perf.get("accuracy_10mm", perf.get("within_10mm_ratio")),
+        }
+
+    return {
+        "status": "unavailable",
+        "average_mae_mm": None,
+        "average_r2": None,
+        "accuracy_5mm": None,
+        "accuracy_10mm": None,
+        "detail": "training_meta present but no performance metrics",
+        "training_meta_keys": sorted(meta.keys()),
+    }
+
+
 @app.get("/model_info")
 async def get_model_info():
     """Детальная информация о модели"""
@@ -185,6 +272,7 @@ async def get_model_info():
     
     # Получение оптимизированных весов
     optimized_weights = getattr(trainer, '_optimized_weights', {})
+    training_meta = model_data.get("training_meta") if isinstance(model_data, dict) else None
     
     return {
         "model_info": {
@@ -193,12 +281,8 @@ async def get_model_info():
             "features_count": len(feature_names),
             "targets_count": len(model_data['models']),
             "data_sources": "DICOMS+Vybor+KiTS19",
-            "performance": {
-                "average_mae_mm": 2.140,
-                "average_r2": 0.139,
-                "accuracy_5mm": 89.2,
-                "accuracy_10mm": 97.6
-            },
+            "performance": _performance_from_training_meta(model_data),
+            "training_meta": training_meta,
             "feature_types": {
                 "base_features": 23,
                 "engineered_features": 13,

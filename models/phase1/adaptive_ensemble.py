@@ -39,6 +39,7 @@ from src.features.projection_enrichment import (
 )
 from src.features.phase1_schema import (
     BASE_FEATURES,
+    CLINICAL_DEMOGRAPHIC_FEATURES,
     CROSS_FEATURES,
     ENGINEERED_FEATURES,
     TARGET_NAMES,
@@ -80,6 +81,7 @@ class AdaptiveEnsembleTrainer:
         self.cross_features = list(CROSS_FEATURES)
         self.displacement_axis_features = filter_model_features(list(DISPLACEMENT_AXIS_FEATURES))
         self.anatomical_features = list(ANATOMICAL_FEATURES)
+        self.clinical_features = list(CLINICAL_DEMOGRAPHIC_FEATURES)
         self.projection_features: list[str] = []
         self.na_trend_feature_cols: list[str] = []
         self.target_columns = list(TARGET_NAMES)
@@ -200,6 +202,7 @@ class AdaptiveEnsembleTrainer:
             c for c in self.displacement_axis_features if c in df_enhanced.columns
         ]
         anatomical_cols = [c for c in self.anatomical_features if c in df_enhanced.columns]
+        clinical_cols = [c for c in self.clinical_features if c in df_enhanced.columns]
         projection_feature_cols = sorted(
             c for c in df_enhanced.columns
             if c.startswith("proj_") and not is_leakage_feature(c)
@@ -222,6 +225,7 @@ class AdaptiveEnsembleTrainer:
             + cross_feature_cols
             + axis_feature_cols
             + anatomical_cols
+            + clinical_cols
             + projection_feature_cols
             + na_trend_feature_cols
         )

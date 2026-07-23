@@ -19,8 +19,8 @@ from pathlib import Path
 
 warnings.warn(
     "train_lasso.py uses a simplified legacy feature set. "
-    "For production training use models/phase1/adaptive_ensemble.py. "
-    "See: python scripts/run_phase1_pipeline.py info",
+    "For production training use scripts/data/train_clinical_honest.py. "
+    "Pass --force-legacy to run this script anyway.",
     DeprecationWarning,
     stacklevel=1,
 )
@@ -28,6 +28,7 @@ warnings.filterwarnings('ignore')
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.features.phase1_schema import BASE_FEATURES, TARGET_NAMES, normalize_dataframe
+from src.features.legacy_force_gate import warn_and_require_force_legacy
 
 class LassoTrainer:
     def __init__(self):
@@ -483,4 +484,5 @@ def main():
     print(f"\nOptimized Lasso regression training completed successfully!")
 
 if __name__ == "__main__":
+    warn_and_require_force_legacy("models/phase1/train_lasso.py")
     main()

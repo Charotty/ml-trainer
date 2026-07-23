@@ -18,8 +18,8 @@ import warnings
 from pathlib import Path
 
 warnings.warn(
-    "train_ridge.py is legacy; use models/phase1/adaptive_ensemble.py. "
-    "See: python scripts/run_phase1_pipeline.py info",
+    "train_ridge.py is legacy; use scripts/data/train_clinical_honest.py. "
+    "Pass --force-legacy to run this script anyway.",
     DeprecationWarning,
     stacklevel=1,
 )
@@ -27,6 +27,7 @@ warnings.filterwarnings('ignore')
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.features.phase1_schema import BASE_FEATURES, TARGET_NAMES
+from src.features.legacy_force_gate import warn_and_require_force_legacy
 
 class RidgeTrainer:
     def __init__(self):
@@ -434,4 +435,5 @@ def main():
     print(f"\nOptimized Ridge regression training completed successfully!")
 
 if __name__ == "__main__":
+    warn_and_require_force_legacy("models/phase1/train_ridge.py")
     main()

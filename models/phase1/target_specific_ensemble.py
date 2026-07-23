@@ -20,8 +20,8 @@ import warnings
 from pathlib import Path
 
 warnings.warn(
-    "target_specific_ensemble.py is legacy; use adaptive_ensemble.py. "
-    "See: python scripts/run_phase1_pipeline.py info",
+    "target_specific_ensemble.py is legacy; use scripts/data/train_clinical_honest.py. "
+    "Pass --force-legacy to run this script anyway.",
     DeprecationWarning,
     stacklevel=1,
 )
@@ -29,6 +29,7 @@ warnings.filterwarnings('ignore')
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.features.phase1_schema import BASE_FEATURES, TARGET_NAMES, normalize_dataframe
+from src.features.legacy_force_gate import warn_and_require_force_legacy
 
 class TargetSpecificEnsembleTrainer:
     def __init__(self):
@@ -496,4 +497,5 @@ def main():
     print(f"\nTarget-specific ensemble models training completed successfully!")
 
 if __name__ == "__main__":
+    warn_and_require_force_legacy("models/phase1/target_specific_ensemble.py")
     main()

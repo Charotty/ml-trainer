@@ -136,6 +136,9 @@ def convert_excel_displacement_df(
             "age": _parse_numeric_series(pd.Series([raw.get("age")])).iloc[0],
             "bmi": _parse_numeric_series(pd.Series([raw.get("bmi")])).iloc[0],
             "body_type": _body_type_to_code(raw.get("body_type")),
+            "has_previous_surgery": _parse_numeric_series(
+                pd.Series([raw.get("has_previous_surgery")])
+            ).iloc[0],
             "scan_position": "supine",
             "source": "Excel",
             "source_name": "Excel",

@@ -70,13 +70,20 @@ targets:
   - kidney_right_delta_y
   - kidney_right_delta_z
 
+# Clinical/demographic tabular fields sourced directly from the Vybor xlsx
+# (dicexe/Смещение - конечное -12 .xlsx). Pre-scan patient characteristics —
+# no lateral-scan leakage risk. Fed to the model since the feature rework.
+clinical_demographic_features:
+  - sex
+  - age
+  - bmi
+  - body_type
+  - has_previous_surgery
+
 # Optional metadata columns stored in integrated datasets but not fed to the model.
 optional_metadata:
   - scan_position
   - patient_position
-  - sex
-  - age
-  - bmi
 
 patient_position_encoding:
   HFS: 1   # head-first supine (default clinical supine)

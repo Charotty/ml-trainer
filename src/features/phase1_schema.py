@@ -95,9 +95,25 @@ TARGET_NAMES: List[str] = [
 OPTIONAL_METADATA_COLUMNS: List[str] = [
     "scan_position",
     "patient_position",
+]
+
+# Clinical/demographic tabular fields sourced directly from the Vybor xlsx
+# (``dicexe/Смещение - конечное -12 .xlsx`` -> data/vybor_from_xlsx.csv).
+# Pre-scan patient characteristics measured once on supine intake — they do
+# not encode any lateral-scan information, so they carry no leakage risk and
+# are legitimate model inputs for displacement magnitude (BMI/body habitus
+# and sex/age are well-established clinical correlates of soft-tissue and
+# organ mobility; prior abdominal/renal surgery is a plausible driver of
+# reduced kidney mobility via adhesions/scarring). Previously parsed into
+# every Vybor CSV but excluded from the training feature contract (or, for
+# ``has_previous_surgery``, never parsed at all); now wired into
+# ``AdaptiveEnsembleTrainer``.
+CLINICAL_DEMOGRAPHIC_FEATURES: List[str] = [
     "sex",
     "age",
     "bmi",
+    "body_type",
+    "has_previous_surgery",
 ]
 
 PATIENT_POSITION_ENCODING: Dict[str, int] = {

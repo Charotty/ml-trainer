@@ -30,9 +30,15 @@ _COL = {
     "sex": 2,
     "age": 3,
     "body_type": 4,
+    "has_previous_surgery": 7,
     "bmi": 8,
-    "abd_width_l3l4_mm": 18,
-    "abd_depth_l3l4_mm": 19,
+    # Col 18 header = "переднезадний (сагиттальный) диаметр" (AP/sagittal) -> depth.
+    # Col 19 header = "поперечный диаметр" (transverse) -> width. Previously
+    # swapped: body_width_mm held the smaller AP value and body_depth_mm held
+    # the larger transverse value, contradicting the width=X/depth=Y
+    # convention used everywhere else (see scripts/inference/enhanced_ct_extractor.py).
+    "abd_width_l3l4_mm": 19,
+    "abd_depth_l3l4_mm": 18,
     "abd_wall_thickness_mm": 11,
     "lumbar_lordosis_deg": 12,
     "s1_plate_tilt_deg": 13,
@@ -144,6 +150,9 @@ def parse_xlsx_raw_table(path: Path | str = DEFAULT_XLSX_PATH) -> pd.DataFrame:
             "sex": _cell(row, _COL["sex"]),
             "age": _parse_numeric(_cell(row, _COL["age"])),
             "body_type": _cell(row, _COL["body_type"]),
+            "has_previous_surgery": _parse_numeric(
+                _cell(row, _COL["has_previous_surgery"])
+            ),
             "bmi": _parse_numeric(_cell(row, _COL["bmi"])),
             "abd_width_l3l4_mm": _parse_numeric(_cell(row, _COL["abd_width_l3l4_mm"])),
             "abd_depth_l3l4_mm": _parse_numeric(_cell(row, _COL["abd_depth_l3l4_mm"])),
@@ -227,7 +236,18 @@ def enrich_with_boku_volumes(
 
 
 def attach_clinical_extras(converted: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
-    """Merge spine/span columns from raw xlsx table onto canonical rows."""
+    """Merge spine/span columns from raw xlsx table onto canonical rows.
+
+    ``convert_excel_displacement_df`` already sets ``lumbar_lordosis_deg``,
+    ``s1_plate_tilt_deg`` and ``abd_wall_thickness_mm`` on ``converted``. A
+    plain ``DataFrame.merge`` against the same-named ``extras`` columns from
+    ``raw`` used to silently rename BOTH copies to ``<col>_x`` / ``<col>_y``
+    (pandas merge-suffix collision), which removed these clinical/anatomical
+    features from the canonical schema without raising any error — they were
+    present in the CSV under the wrong name and therefore never reached
+    ``ANATOMICAL_FEATURES`` / ``DISPLACEMENT_AXIS_FEATURES``. Columns already
+    present in ``converted`` are coalesced (NaN-fill only) instead of merged.
+    """
     extras = [c for c in CLINICAL_EXTRA_COLUMNS if c in raw.columns]
     if not extras or "fio" not in raw.columns:
         return converted
@@ -238,7 +258,22 @@ def attach_clinical_extras(converted: pd.DataFrame, raw: pd.DataFrame) -> pd.Dat
     name_col = "full_name" if "full_name" in out.columns else "fio"
     out["_merge_key"] = out[name_col].astype(str).str.strip().str.lower()
     extra_df = raw_key[["_merge_key"] + extras].drop_duplicates("_merge_key", keep="first")
-    out = out.merge(extra_df, on="_merge_key", how="left")
+
+    already_present = [c for c in extras if c in out.columns]
+    new_cols = [c for c in extras if c not in out.columns]
+
+    if new_cols:
+        out = out.merge(extra_df[["_merge_key"] + new_cols], on="_merge_key", how="left")
+
+    if already_present:
+        rename_map = {c: f"__extra__{c}" for c in already_present}
+        coalesce_df = extra_df[["_merge_key"] + already_present].rename(columns=rename_map)
+        out = out.merge(coalesce_df, on="_merge_key", how="left")
+        for c in already_present:
+            shadow_col = rename_map[c]
+            out[c] = out[c].fillna(out[shadow_col])
+            out = out.drop(columns=[shadow_col])
+
     return out.drop(columns=["_merge_key"], errors="ignore")
 
 

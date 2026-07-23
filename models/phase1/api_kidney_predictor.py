@@ -24,10 +24,14 @@ import warnings
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.features.phase1_schema import BASE_FEATURES
+from src.features.legacy_force_gate import (
+    CANONICAL_API,
+    warn_and_require_force_legacy,
+)
 
 warnings.warn(
     "models.phase1.api_kidney_predictor is deprecated; use the FastAPI "
-    "service at src/api/kidney_displacement_api.py instead.",
+    f"service at {CANONICAL_API} instead. Pass --force-legacy to run anyway.",
     DeprecationWarning,
     stacklevel=2,
 )
@@ -588,4 +592,8 @@ def main():
         print("\n🛑 API server stopped")
 
 if __name__ == "__main__":
+    warn_and_require_force_legacy(
+        "models/phase1/api_kidney_predictor.py",
+        replacement=CANONICAL_API,
+    )
     main()
