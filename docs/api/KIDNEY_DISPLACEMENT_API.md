@@ -58,10 +58,15 @@ http://127.0.0.1:8000
     "targets_count": 6,
     "data_sources": "DICOMS+Vybor+KiTS19",
     "performance": {
-      "average_mae_mm": 2.140,
-      "average_r2": 0.139,
-      "accuracy_5mm": 89.2,
-      "accuracy_10mm": 97.6
+      "status": "unavailable",
+      "average_mae_mm": null,
+      "average_r2": null,
+      "accuracy_5mm": null,
+      "accuracy_10mm": null,
+      "detail": "training_meta present but no performance metrics"
+    },
+    "training_meta": {
+      "clinical_only": true
     },
     "feature_types": {
       "base_features": 23,

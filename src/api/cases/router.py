@@ -29,11 +29,22 @@ from .worker import is_analyze_running, start_analyze
 
 from src.visualization.displacement_plots import build_case_report_pdf  # noqa: E402
 
+_MODEL_UNAVAILABLE = (
+    "Модель не загружена. Обучите clinical_honest.pkl и перезапустите CT Workbench API."
+)
+
+
 def create_cases_router(
     storage: CaseStorage,
     get_predictor: Callable[[], ProductionPredictor],
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/cases", tags=["cases"])
+
+    def _require_predictor() -> ProductionPredictor:
+        try:
+            return get_predictor()
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=503, detail=_MODEL_UNAVAILABLE) from exc
 
     @router.post("", response_model=CreateCaseResponse)
     def create_case(body: CreateCaseRequest) -> CreateCaseResponse:
@@ -89,7 +100,8 @@ def create_cases_router(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         if is_analyze_running(case_id):
             return {"case_id": case_id, "status": "extracting", "message": "Job already running"}
-        if not start_analyze(storage, case_id, get_predictor()):
+        predictor = _require_predictor()
+        if not start_analyze(storage, case_id, predictor):
             raise HTTPException(status_code=409, detail="Analyze already running")
         return {"case_id": case_id, "status": "extracting", "message": "Job started"}
 
@@ -147,7 +159,7 @@ def create_cases_router(
                 "overrides": body.overrides,
             },
         )
-        pred = get_predictor()
+        pred = _require_predictor()
         base_out, all_features, coverage, missing = build_features_from_base(
             merged,
             feature_names=list(pred.payload["feature_names"]),
@@ -172,7 +184,7 @@ def create_cases_router(
         base = storage.read_json_artifact(case_id, "base_features.json")
         if not base:
             raise HTTPException(status_code=400, detail="No features. Run analyze or manual input first.")
-        pred = get_predictor()
+        pred = _require_predictor()
         predictions = pred.predict_row(base)
         storage.write_json_artifact(
             case_id,

@@ -22,7 +22,13 @@ from reliability.confidence_constraints import (
 logger = logging.getLogger(__name__)
 
 class KidneyARSystem:
-    """Основная система предсказания смещения почек для AR"""
+    """Основная система предсказания смещения почек для AR.
+
+    ML outputs are **displacement deltas** (mm). Constraint / fallback wiring
+    must use ``AnatomicalConstraints.apply_constraints_from_displacement``
+    (via ``FallbackHandler.handle_prediction``), not absolute-position
+    ``apply_constraints``.
+    """
     
     def __init__(self, model_path: str = None, pipeline_path: str = None):
         """
@@ -274,7 +280,10 @@ class KidneyARSystem:
     
     def _apply_constraints_and_fallback(self, features: np.ndarray, prediction: np.ndarray, 
                                       confidence: float, patient_data: Dict) -> np.ndarray:
-        """Применение ограничений и fallback логики"""
+        """Apply anatomical constraints treating ``prediction`` as displacement deltas.
+
+        Routes through ``FallbackHandler`` → ``apply_constraints_from_displacement``.
+        """
         # Получаем исходное положение
         original_left = np.array([
             patient_data.get('kidney_left_center_x_mm', 0),

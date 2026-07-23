@@ -59,4 +59,9 @@ def test_build_case_report_pdf_writes_file(tmp_path: Path) -> None:
     out = tmp_path / "report.pdf"
     build_case_report_pdf(report, out)
     assert out.exists()
-    assert out.read_bytes()[:4] == b"%PDF"
+    data = out.read_bytes()
+    assert data[:4] == b"%PDF"
+    # Vector ReportLab layout should stay compact (no scatter-cloud bitmaps).
+    assert 2_000 < out.stat().st_size < 1_500_000
+    # Multi-page: at least a few page markers.
+    assert data.count(b"/Type /Page") >= 3 or data.count(b"/Type/Page") >= 3

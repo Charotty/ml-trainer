@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from common import (
+    DEFAULT_MODEL_PATH_STR,
     TARGET_COLUMNS,
     build_or_load_predictor,
     ensure_run_dirs,
@@ -23,7 +24,7 @@ from common import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="data/vybor_unified_features.csv")
-    parser.add_argument("--model", default="models/adaptive_ensemble.pkl")
+    parser.add_argument("--model", default=DEFAULT_MODEL_PATH_STR)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--out-dir", default="results/validation_runs")
     parser.add_argument("--num-cases", type=int, default=6)

@@ -95,6 +95,52 @@ def test_fallback_handler_treats_ml_output_as_displacement() -> None:
     assert np.allclose(constrained_delta + original, expected_pos, atol=1e-6)
 
 
+def test_ar_constraint_path_uses_displacement_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    """KidneyARSystem constraint path must call apply_constraints_from_displacement."""
+    body_limits = {
+        "x_min": -150,
+        "x_max": 150,
+        "y_min": -100,
+        "y_max": 100,
+        "z_min": 50,
+        "z_max": 150,
+    }
+    constraints = AnatomicalConstraints(body_limits, np.array([0.0, 0.0, 100.0]))
+    calls: list[tuple[np.ndarray, np.ndarray]] = []
+    real = constraints.apply_constraints_from_displacement
+
+    def _spy(original_pos: np.ndarray, displacement: np.ndarray) -> np.ndarray:
+        calls.append((np.asarray(original_pos).copy(), np.asarray(displacement).copy()))
+        return real(original_pos, displacement)
+
+    monkeypatch.setattr(constraints, "apply_constraints_from_displacement", _spy)
+    handler = FallbackHandler(None, constraints)
+    system = KidneyARSystem()
+    system.fallback_handler = handler
+    system.constraints = constraints
+
+    patient = {
+        "kidney_left_center_x_mm": -50.0,
+        "kidney_left_center_y_mm": 20.0,
+        "kidney_left_center_z_mm": 95.0,
+        "kidney_right_center_x_mm": 52.0,
+        "kidney_right_center_y_mm": 19.0,
+        "kidney_right_center_z_mm": 96.0,
+    }
+    prediction = np.array([5.0, -3.0, 2.0, -4.0, 1.0, 0.5])
+    out = system._apply_constraints_and_fallback(
+        features=np.zeros(4),
+        prediction=prediction,
+        confidence=0.9,
+        patient_data=patient,
+    )
+
+    assert len(calls) == 2
+    assert np.allclose(calls[0][1], prediction[:3])
+    assert np.allclose(calls[1][1], prediction[3:])
+    assert out.shape == (6,)
+
+
 def test_validate_processed_data_flags_out_of_range_deltas() -> None:
     """Range check must use boolean mask, not sum of absolutes (audit 1.11)."""
     validator = DataValidator()

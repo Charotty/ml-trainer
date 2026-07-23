@@ -8,8 +8,9 @@ import importlib
 import sys
 from pathlib import Path
 
-
 REQUIRED_MODULES = ["numpy", "pandas", "sklearn", "joblib", "matplotlib", "fastapi"]
+DEFAULT_MODEL_PATH = "models/adaptive_ensemble_clinical_honest.pkl"
+LEGACY_MODEL_NAME = "adaptive_ensemble.pkl"
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,8 +22,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default="models/adaptive_ensemble.pkl",
-        help="Path to model artifact (optional, warning if absent)",
+        default=DEFAULT_MODEL_PATH,
+        help="Path to model artifact (required; FAIL if absent)",
     )
     return parser.parse_args()
 
@@ -52,9 +53,14 @@ def main() -> int:
 
     if model_path.exists():
         print(f"[OK] model: {model_path}")
+        if model_path.name == LEGACY_MODEL_NAME:
+            print(
+                f"[WARN] legacy model path '{model_path.name}'; "
+                f"prefer '{DEFAULT_MODEL_PATH}'."
+            )
     else:
-        print(f"[WARN] model missing: {model_path}")
-        print("       Validation will fallback to on-the-fly RandomForest baseline.")
+        ok = False
+        print(f"[FAIL] model missing: {model_path}")
 
     return 0 if ok else 2
 

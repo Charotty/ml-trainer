@@ -84,3 +84,35 @@ def test_create_case_and_predict_flow(client: TestClient, tmp_path: Path) -> Non
     assert pdf.status_code == 200
     assert pdf.headers["content-type"] == "application/pdf"
     assert pdf.content[:4] == b"%PDF"
+
+
+def test_predict_returns_503_when_model_missing(tmp_path: Path) -> None:
+    storage = CaseStorage(root=tmp_path / "cases")
+
+    def _missing_model():
+        raise FileNotFoundError("no pkl")
+
+    application = create_app(storage=storage, predictor_factory=_missing_model)
+    client = TestClient(application)
+    create = client.post("/api/v1/cases", json={"patient_label": "p2"})
+    case_id = create.json()["case_id"]
+    storage.write_json_artifact(case_id, "base_features.json", {"kidney_left_center_x_rel": 1.0})
+    storage.update_meta(case_id, status="features_ready")
+    pred = client.post(f"/api/v1/cases/{case_id}/predict")
+    assert pred.status_code == 503
+    assert "модель" in pred.json()["detail"].lower() or "Модель" in pred.json()["detail"]
+
+
+def test_analyze_returns_503_when_model_missing(tmp_path: Path) -> None:
+    storage = CaseStorage(root=tmp_path / "cases")
+
+    def _missing_model():
+        raise FileNotFoundError("no pkl")
+
+    application = create_app(storage=storage, predictor_factory=_missing_model)
+    client = TestClient(application)
+    create = client.post("/api/v1/cases", json={})
+    case_id = create.json()["case_id"]
+    storage.update_meta(case_id, status="uploaded")
+    res = client.post(f"/api/v1/cases/{case_id}/analyze")
+    assert res.status_code == 503

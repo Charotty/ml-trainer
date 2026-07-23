@@ -39,12 +39,12 @@ const QA_GROUPS = [
 
 // UI-P2-02: русские подписи таргетов прогноза
 const PRED_LABELS = {
-  kidney_left_delta_x: "Левая почка, ΔX",
-  kidney_left_delta_y: "Левая почка, ΔY",
-  kidney_left_delta_z: "Левая почка, ΔZ",
-  kidney_right_delta_x: "Правая почка, ΔX",
-  kidney_right_delta_y: "Правая почка, ΔY",
-  kidney_right_delta_z: "Правая почка, ΔZ",
+  kidney_left_delta_x: "Левая почка, вправо–влево",
+  kidney_left_delta_y: "Левая почка, вперёд–назад",
+  kidney_left_delta_z: "Левая почка, вверх–вниз",
+  kidney_right_delta_x: "Правая почка, вправо–влево",
+  kidney_right_delta_y: "Правая почка, вперёд–назад",
+  kidney_right_delta_z: "Правая почка, вверх–вниз",
 };
 
 // UI-P1-07: человекочитаемые статусы и стадии extraction
@@ -66,9 +66,46 @@ const QA_READY_STATUSES = ["features_ready", "qa_pending", "predicted", "reporte
 let caseId = null;
 let caseStatus = "created";
 let pollTimer = null;
+let polledCaseId = null;
+let modelLoaded = false;
+let patientLabel = null;
 let qaBaseline = {}; // TD-05: исходные значения для dirty tracking
 
 const el = (id) => document.getElementById(id);
+
+const ANALYZE_ALLOWED = new Set(["uploaded", "failed"]);
+const PREDICT_ALLOWED = new Set(["features_ready", "qa_pending", "predicted", "reported"]);
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  polledCaseId = null;
+}
+
+function startPolling(id) {
+  stopPolling();
+  if (!id) return;
+  polledCaseId = id;
+  pollTimer = setInterval(pollStatus, 2000);
+  pollStatus();
+}
+
+function updateActionButtons() {
+  const hasCase = Boolean(caseId);
+  el("btnUpload").disabled = !hasCase;
+  const canAnalyze =
+    hasCase && modelLoaded && ANALYZE_ALLOWED.has(caseStatus) && caseStatus !== "extracting";
+  el("btnAnalyze").disabled = !canAnalyze;
+  const canPredict = hasCase && modelLoaded && PREDICT_ALLOWED.has(caseStatus);
+  el("btnPredict").disabled = !canPredict;
+  const canReport = hasCase && ["predicted", "reported"].includes(caseStatus);
+  el("btnReport").disabled = !canReport;
+  el("btnReportPdf").disabled = !canReport;
+  el("btnSaveQa").disabled = !hasCase;
+  el("btnReloadFeatures").disabled = !hasCase || !QA_READY_STATUSES.includes(caseStatus);
+}
 
 // ---------------------------------------------------------------------------
 // Уведомления (UI-P1-02): toast вместо alert()
@@ -90,19 +127,27 @@ function showError(message) {
   showToast(message, "error");
 }
 
-// UI-P1-03: disable + текст «Загрузка…» на время запроса
-async function withBusy(btn, busyText, fn) {
+// UI-P1-03: disable + текст «Загрузка…» на время запроса.
+// keepDisabled=true leaves the button disabled after success (e.g. Analyze while extracting).
+async function withBusy(btn, busyText, fn, { keepDisabled = false } = {}) {
   if (btn.disabled) return;
   const originalText = btn.textContent;
   btn.disabled = true;
   btn.textContent = busyText;
+  let ok = false;
   try {
     await fn();
+    ok = true;
   } catch (e) {
     showError(e.message || String(e));
   } finally {
     btn.textContent = originalText;
-    btn.disabled = false;
+    if (keepDisabled && ok) {
+      btn.disabled = true;
+    } else {
+      btn.disabled = false;
+      updateActionButtons();
+    }
   }
 }
 
@@ -132,16 +177,13 @@ function showWorkflow(step = "upload") {
 }
 
 el("btnNewCase").onclick = () => {
+  stopPolling();
   caseId = null;
   caseStatus = "created";
+  patientLabel = null;
   el("caseInfo").textContent = "";
   el("patientLabel").value = "";
   el("dicomFile").value = "";
-  el("btnUpload").disabled = true;
-  el("btnAnalyze").disabled = true;
-  el("btnPredict").disabled = true;
-  el("btnReport").disabled = true;
-  el("btnReportPdf").disabled = true;
   el("predTable").classList.add("hidden");
   el("coverageBlock").classList.add("hidden");
   el("progress").classList.add("hidden");
@@ -149,10 +191,12 @@ el("btnNewCase").onclick = () => {
   el("reportSummary").textContent = "Сформируйте отчёт после шага «Прогноз».";
   buildQaForm();
   updateWizardLocks();
+  updateActionButtons();
   showWorkflow("upload");
 };
 
 el("btnBackToCases").onclick = () => {
+  stopPolling();
   showDashboard();
   refreshCaseList();
 };
@@ -191,18 +235,27 @@ document.querySelectorAll(".wizard-tab").forEach((tab) => {
 // Кейс и статусы
 // ---------------------------------------------------------------------------
 
-function setCase(id, status = "created") {
+function setCase(id, status = "created", label = null) {
+  if (caseId && caseId !== id) {
+    stopPolling();
+  }
   caseId = id;
   caseStatus = status;
-  el("caseInfo").textContent = `case_id: ${caseId}`;
-  el("btnUpload").disabled = !caseId;
-  el("btnAnalyze").disabled = !caseId;
+  if (label != null) patientLabel = label;
+  el("caseInfo").textContent = caseId
+    ? `Кейс: ${patientLabel || caseId.slice(0, 8)}…`
+    : "";
+  if (patientLabel && el("patientLabel")) {
+    el("patientLabel").value = patientLabel;
+  }
   updateWizardLocks();
+  updateActionButtons();
 }
 
 function setStatus(status) {
   caseStatus = status;
   updateWizardLocks();
+  updateActionButtons();
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +326,7 @@ function readQaOverrides() {
 function showCoverage(coveragePct, missing) {
   el("coverageBlock").classList.remove("hidden");
   const badge = el("coverageBadge");
-  badge.textContent = `Coverage: ${coveragePct.toFixed(1)}%`;
+  badge.textContent = `Полнота данных КТ: ${coveragePct.toFixed(0)}%`;
   badge.className = "coverage-badge " + (coveragePct >= 90 ? "cov-ok" : coveragePct >= 80 ? "cov-warn" : "cov-bad");
   el("coverageWarning").classList.toggle("hidden", coveragePct >= 80);
 
@@ -308,7 +361,8 @@ function showPredictions(predictions) {
     name.textContent = PRED_LABELS[key] || key;
     name.title = key;
     const value = document.createElement("td");
-    value.textContent = Number(val).toFixed(2);
+    const num = Number(val);
+    value.textContent = Number.isFinite(num) ? num.toFixed(2) : "н/д";
     tr.appendChild(name);
     tr.appendChild(value);
     tbody.appendChild(tr);
@@ -324,23 +378,28 @@ async function refreshHealth() {
   try {
     const h = await fetch("/health").then((r) => r.json());
     const node = el("health");
-    if (h.model_loaded) {
-      node.textContent = `API OK · ${h.model_id} · ${h.feature_count} признаков`;
+    modelLoaded = Boolean(h.model_loaded);
+    if (modelLoaded) {
+      node.textContent = `API OK · модель загружена`;
       node.className = "health ok";
     } else {
-      node.textContent = "API OK · модель не загружена (обучите clinical_honest.pkl)";
+      node.textContent = "API OK · модель не загружена — анализ и прогноз недоступны";
       node.className = "health err";
     }
   } catch {
+    modelLoaded = false;
     el("health").textContent = "API недоступен";
     el("health").className = "health err";
   }
+  updateActionButtons();
 }
 
 async function pollStatus() {
-  if (!caseId) return;
+  if (!caseId || !polledCaseId || caseId !== polledCaseId) return;
+  const watchedId = polledCaseId;
   try {
-    const st = await api(`/${caseId}/status`);
+    const st = await api(`/${watchedId}/status`);
+    if (caseId !== watchedId || polledCaseId !== watchedId) return;
     setStatus(st.status);
     el("progress").classList.remove("hidden");
     el("progressBar").style.width = `${st.progress_pct}%`;
@@ -352,23 +411,30 @@ async function pollStatus() {
     el("progressText").classList.remove("progress-error");
 
     if (st.status === "features_ready" || st.status === "qa_pending") {
-      clearInterval(pollTimer);
-      pollTimer = null;
-      await loadFeatures();
-      el("btnPredict").disabled = false;
-      showToast("Извлечение признаков завершено");
+      stopPolling();
       showStep("qa");
+      try {
+        await loadFeatures();
+        showToast("Извлечение признаков завершено");
+      } catch (loadErr) {
+        el("progressText").textContent =
+          `Признаки извлечены, но не загрузились: ${loadErr.message || loadErr}`;
+        el("progressText").classList.add("progress-error");
+        showError("Extraction завершён, но QA не загрузилась — нажмите «Повторить загрузку признаков»");
+        el("btnReloadFeatures").disabled = false;
+      }
+      updateActionButtons();
     }
     if (st.status === "failed") {
-      clearInterval(pollTimer);
-      pollTimer = null;
-      // UI-P1-07: текст ошибки в карточке, не только в консоли
+      stopPolling();
       el("progressText").textContent = `Ошибка extraction: ${st.error || st.message || "неизвестная ошибка"}`;
       el("progressText").classList.add("progress-error");
       showError("Extraction завершился с ошибкой");
+      updateActionButtons();
     }
   } catch (e) {
     console.error(e);
+    showError(`Ошибка опроса статуса: ${e.message || e}`);
   }
 }
 
@@ -380,6 +446,7 @@ async function loadFeatures() {
   });
   buildQaForm(feat.base_features, manualFields);
   showCoverage(feat.coverage_pct, feat.missing_features || []);
+  updateActionButtons();
 }
 
 // UI-P1-04: подгрузка сохранённого прогноза при открытии кейса
@@ -421,19 +488,31 @@ async function refreshCaseList() {
       btn.textContent = "Открыть";
       btn.onclick = () =>
         withBusy(btn, "Открытие…", async () => {
-          setCase(c.case_id, c.status);
+          stopPolling();
+          setCase(c.case_id, c.status, c.patient_label || null);
           showWorkflow("upload");
+          if (c.status === "extracting") {
+            el("progress").classList.remove("hidden");
+            showStep("analyze");
+            startPolling(c.case_id);
+            return;
+          }
+          if (c.status === "uploaded" || c.status === "failed") {
+            showStep("analyze");
+          }
           if (QA_READY_STATUSES.includes(c.status)) {
-            await loadFeatures();
-            el("btnPredict").disabled = false;
+            try {
+              await loadFeatures();
+            } catch (e) {
+              showError(`Не удалось загрузить признаки: ${e.message || e}`);
+            }
             showStep("qa");
           }
           if (c.status === "predicted" || c.status === "reported") {
-            el("btnReport").disabled = false;
-            el("btnReportPdf").disabled = false;
             await loadPrediction();
             showStep("predict");
           }
+          updateActionButtons();
         });
       td.appendChild(btn);
       tr.appendChild(td);
@@ -450,19 +529,17 @@ async function refreshCaseList() {
 
 el("btnCreate").onclick = () =>
   withBusy(el("btnCreate"), "Создание…", async () => {
+    stopPolling();
     const label = el("patientLabel").value.trim() || null;
     const res = await api("", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ patient_label: label }),
     });
-    setCase(res.case_id, res.status);
+    setCase(res.case_id, res.status, label);
     buildQaForm();
     el("predTable").classList.add("hidden");
     el("coverageBlock").classList.add("hidden");
-    el("btnPredict").disabled = true;
-    el("btnReport").disabled = true;
-    el("btnReportPdf").disabled = true;
     showToast("Кейс создан");
     await refreshCaseList();
     showWorkflow("upload");
@@ -477,21 +554,34 @@ el("btnUpload").onclick = () =>
     const res = await fetch(`${API}/${caseId}/upload`, { method: "POST", body: fd });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail || res.statusText);
+      const detail = typeof err.detail === "string" ? err.detail : JSON.stringify(err.detail);
+      throw new Error(detail || res.statusText);
     }
     setStatus("uploaded");
-    el("btnAnalyze").disabled = false;
     showToast("DICOM загружен");
     showStep("analyze");
   });
 
 el("btnAnalyze").onclick = () =>
-  withBusy(el("btnAnalyze"), "Запуск…", async () => {
-    await api(`/${caseId}/analyze`, { method: "POST" });
-    el("progress").classList.remove("hidden");
-    if (pollTimer) clearInterval(pollTimer);
-    pollTimer = setInterval(pollStatus, 2000);
-    pollStatus();
+  withBusy(
+    el("btnAnalyze"),
+    "Запуск…",
+    async () => {
+      if (!modelLoaded) throw new Error("Модель не загружена — анализ недоступен");
+      await api(`/${caseId}/analyze`, { method: "POST" });
+      setStatus("extracting");
+      el("progress").classList.remove("hidden");
+      showStep("analyze");
+      startPolling(caseId);
+    },
+    { keepDisabled: true },
+  );
+
+el("btnReloadFeatures").onclick = () =>
+  withBusy(el("btnReloadFeatures"), "Загрузка…", async () => {
+    await loadFeatures();
+    showToast("Признаки загружены");
+    showStep("qa");
   });
 
 el("btnSaveQa").onclick = () =>
@@ -508,17 +598,15 @@ el("btnSaveQa").onclick = () =>
     });
     setStatus("qa_pending");
     await loadFeatures();
-    el("btnPredict").disabled = false;
     showToast("Правки сохранены");
   });
 
 el("btnPredict").onclick = () =>
   withBusy(el("btnPredict"), "Прогноз…", async () => {
+    if (!modelLoaded) throw new Error("Модель не загружена — прогноз недоступен");
     const res = await api(`/${caseId}/predict`, { method: "POST" });
     setStatus("predicted");
     showPredictions(res.predictions);
-    el("btnReport").disabled = false;
-    el("btnReportPdf").disabled = false;
     updateReportPreview(res.predictions);
     showToast("Прогноз рассчитан");
   });
@@ -531,33 +619,47 @@ function vectorNorm3(dx, dy, dz) {
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+function fmtMm(val) {
+  const num = Number(val);
+  return Number.isFinite(num) ? num.toFixed(1) : "н/д";
+}
+
 function updateReportPreview(predictions) {
   if (!predictions) return;
   const left = {
-    x: Number(predictions.kidney_left_delta_x || 0),
-    y: Number(predictions.kidney_left_delta_y || 0),
-    z: Number(predictions.kidney_left_delta_z || 0),
+    x: Number(predictions.kidney_left_delta_x),
+    y: Number(predictions.kidney_left_delta_y),
+    z: Number(predictions.kidney_left_delta_z),
   };
   const right = {
-    x: Number(predictions.kidney_right_delta_x || 0),
-    y: Number(predictions.kidney_right_delta_y || 0),
-    z: Number(predictions.kidney_right_delta_z || 0),
+    x: Number(predictions.kidney_right_delta_x),
+    y: Number(predictions.kidney_right_delta_y),
+    z: Number(predictions.kidney_right_delta_z),
   };
-  const leftNorm = vectorNorm3(left.x, left.y, left.z);
-  const rightNorm = vectorNorm3(right.x, right.y, right.z);
+  const leftNorm = Number.isFinite(left.x + left.y + left.z)
+    ? vectorNorm3(left.x || 0, left.y || 0, left.z || 0)
+    : NaN;
+  const rightNorm = Number.isFinite(right.x + right.y + right.z)
+    ? vectorNorm3(right.x || 0, right.y || 0, right.z || 0)
+    : NaN;
 
   el("reportSummary").textContent =
-    "Клиническое резюме: прогноз смещения почек при переводе из supine в lateral. " +
-    "PDF содержит текст для врача и инженера, таблицы Δ и графики (столбцы, нормы векторов, 3D-проекции).";
+    "Прогноз смещения почек при переводе пациента со спины на бок. " +
+    "PDF-отчёт рассчитан для клинического чтения (мм, анатомические направления).";
 
   const preview = el("reportPreview");
   preview.innerHTML = `
-    <h3>Краткое резюме прогноза</h3>
+    <h3>Краткое резюме для врача</h3>
     <ul>
-      <li><strong>Левая почка:</strong> ΔX=${left.x.toFixed(1)}, ΔY=${left.y.toFixed(1)}, ΔZ=${left.z.toFixed(1)} мм; ‖Δ‖=${leftNorm.toFixed(1)} мм</li>
-      <li><strong>Правая почка:</strong> ΔX=${right.x.toFixed(1)}, ΔY=${right.y.toFixed(1)}, ΔZ=${right.z.toFixed(1)} мм; ‖Δ‖=${rightNorm.toFixed(1)} мм</li>
+      <li><strong>Левая почка:</strong> вправо–влево ${fmtMm(left.x)} мм,
+        вперёд–назад ${fmtMm(left.y)} мм, вверх–вниз ${fmtMm(left.z)} мм;
+        суммарно ${fmtMm(leftNorm)} мм</li>
+      <li><strong>Правая почка:</strong> вправо–влево ${fmtMm(right.x)} мм,
+        вперёд–назад ${fmtMm(right.y)} мм, вверх–вниз ${fmtMm(right.z)} мм;
+        суммарно ${fmtMm(rightNorm)} мм</li>
     </ul>
-    <p class="report-note">Оси: X — медиолатерально (L→R), Y — передне-задне (P→A), Z — краниокаудально (I→S).</p>
+    <p class="report-note">Направления: вправо — к правой стороне тела; вперёд — к животу;
+      вверх — к голове. Исходное положение — лёжа на спине (МСКТ).</p>
   `;
   preview.classList.remove("hidden");
 }
@@ -581,7 +683,10 @@ async function downloadReportPdf() {
   }
   setStatus("reported");
   const blob = await res.blob();
-  const label = el("patientLabel")?.value?.trim() || caseId.slice(0, 8);
+  const label = (patientLabel || el("patientLabel")?.value?.trim() || caseId.slice(0, 8)).replace(
+    /[^\w\-а-яА-ЯёЁ]+/gi,
+    "_",
+  );
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = `ct_workbench_report_${label}.pdf`;

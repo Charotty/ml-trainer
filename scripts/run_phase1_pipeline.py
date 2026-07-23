@@ -62,7 +62,7 @@ def cmd_train(_args: argparse.Namespace) -> int:
 
 def cmd_validate(args: argparse.Namespace) -> int:
     dataset = args.dataset or ROOT / "data" / "processed" / "validation.csv"
-    model = args.model or ROOT / "models" / "adaptive_ensemble.pkl"
+    model = args.model or ROOT / "models" / "adaptive_ensemble_clinical_honest.pkl"
     run_id = args.run_id
     if not run_id:
         print("error: --run-id is required for validate", file=sys.stderr)
@@ -166,7 +166,7 @@ def main() -> int:
         "--model",
         type=Path,
         default=None,
-        help="Default: models/adaptive_ensemble.pkl",
+        help="Default: models/adaptive_ensemble_clinical_honest.pkl",
     )
     p_validate.add_argument("--out-dir", type=Path, default=ROOT / "results" / "validation_runs")
     p_validate.add_argument("--seed", type=int, default=42)

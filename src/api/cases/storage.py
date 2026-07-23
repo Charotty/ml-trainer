@@ -75,6 +75,49 @@ class CaseStorage:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    @staticmethod
+    def _safe_zip_member_path(member_name: str, dicom_dir: Path) -> Path | None:
+        """Map a ZIP member name to a path under ``dicom_dir`` without traversal.
+
+        Preserves relative folder structure so nested series with identical
+        basenames do not overwrite each other. Returns ``None`` for unsafe
+        or empty names.
+        """
+        # Zip members may use backslashes on Windows archives.
+        normalized = member_name.replace("\\", "/").lstrip("/")
+        if not normalized or normalized.endswith("/"):
+            return None
+        parts: list[str] = []
+        for part in Path(normalized).parts:
+            if part in ("", ".", ".."):
+                return None
+            # Strip drive letters / absolute roots if present.
+            if Path(part).is_absolute() or (len(part) >= 2 and part[1] == ":"):
+                return None
+            parts.append(part)
+        if not parts:
+            return None
+        target = dicom_dir.joinpath(*parts)
+        try:
+            target.resolve().relative_to(dicom_dir.resolve())
+        except ValueError:
+            return None
+        return target
+
+    @staticmethod
+    def _unique_target(path: Path) -> Path:
+        """If ``path`` exists, append ``_2``, ``_3``, … before the suffix."""
+        if not path.exists():
+            return path
+        stem, suffix = path.stem, path.suffix
+        parent = path.parent
+        n = 2
+        while True:
+            candidate = parent / f"{stem}_{n}{suffix}"
+            if not candidate.exists():
+                return candidate
+            n += 1
+
     def save_upload_zip(self, case_id: str, zip_path: Path) -> int:
         dicom_dir = self.case_dir(case_id) / "dicom"
         if dicom_dir.exists():
@@ -85,7 +128,11 @@ class CaseStorage:
             for name in zf.namelist():
                 if name.endswith("/"):
                     continue
-                target = dicom_dir / Path(name).name
+                target = self._safe_zip_member_path(name, dicom_dir)
+                if target is None:
+                    continue
+                target = self._unique_target(target)
+                target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(zf.read(name))
                 count += 1
         self.update_meta(

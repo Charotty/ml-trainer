@@ -8,8 +8,8 @@ from .schemas import FeaturesResponse
 from .storage import CaseStorage
 
 DISCLAIMER = (
-    "Исследовательский инструмент. Не заменяет клинический протокол. "
-    "Прогноз основан на supine-МСКТ и production-модели Adaptive Ensemble (na_trends)."
+    "Исследовательский инструмент для планирования доступа. "
+    "Не заменяет клинический протокол, осмотр и решение лечащего врача."
 )
 
 

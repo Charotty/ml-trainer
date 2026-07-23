@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,9 +17,6 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-
-
-import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -31,6 +30,25 @@ from src.features.phase1_schema import (  # noqa: E402
 )
 
 TARGET_COLUMNS: List[str] = list(TARGET_NAMES)
+
+# Canonical production artifact (honest clinical training with na_trends).
+DEFAULT_MODEL_PATH = ROOT / "models" / "adaptive_ensemble_clinical_honest.pkl"
+DEFAULT_MODEL_PATH_STR = "models/adaptive_ensemble_clinical_honest.pkl"
+LEGACY_MODEL_NAME = "adaptive_ensemble.pkl"
+
+
+def warn_if_legacy_model(model_path: Path | str | None) -> None:
+    """Emit a warning when the legacy adaptive_ensemble.pkl path is used."""
+    if model_path is None:
+        return
+    path = Path(model_path)
+    if path.name == LEGACY_MODEL_NAME:
+        warnings.warn(
+            f"Using legacy model path '{path}'. Prefer canonical "
+            f"'{DEFAULT_MODEL_PATH_STR}'.",
+            UserWarning,
+            stacklevel=2,
+        )
 
 
 @dataclass
@@ -49,6 +67,8 @@ class PredictorBundle:
     quantile_model: Optional[Any] = None
     z_head: str = "ensemble"
     z_driver_names: Optional[List[str]] = None
+    enrichment_mode: str = "projection"
+    na_trend_store: Optional[Dict[str, Any]] = None
 
 
 def ensure_run_dirs(base_output_dir: Path, run_id: str) -> Path:
@@ -91,6 +111,8 @@ def load_ct_features(path: Path) -> pd.DataFrame:
 
 def load_model_bundle(model_path: Path) -> PredictorBundle:
     """Load a pretrained displacement model artifact."""
+    model_path = Path(model_path)
+    warn_if_legacy_model(model_path)
     if not model_path.exists():
         raise FileNotFoundError(f"Model not found: {model_path}")
     payload = joblib.load(model_path)
@@ -109,6 +131,8 @@ def load_model_bundle(model_path: Path) -> PredictorBundle:
         quantile_model=payload.get("quantile_model"),
         z_head=payload.get("z_head", "ensemble"),
         z_driver_names=payload.get("z_driver_names"),
+        enrichment_mode=payload.get("enrichment_mode", "projection"),
+        na_trend_store=payload.get("na_trend_store"),
     )
 
 
@@ -132,29 +156,11 @@ def build_or_load_predictor(
     else:
         train_df, eval_df = train_test_split(df, test_size=test_size, random_state=seed)
 
-    if model_path and model_path.exists():
-        try:
-            payload = joblib.load(model_path)
-            bundle = PredictorBundle(
-                mode="pretrained_adaptive_ensemble",
-                feature_names=payload["feature_names"],
-                target_names=list(payload["models"].keys()),
-                scaler=payload["scaler"],
-                models=payload["models"],
-                imputer=payload.get("imputer"),
-                left_z_calibrator=payload.get("left_z_calibrator"),
-                right_z_calibrator=payload.get("right_z_calibrator"),
-                side_z_models=payload.get("side_z_models"),
-                multitask_model=payload.get("multitask_model"),
-                multitask_blend=payload.get("multitask_blend"),
-                quantile_model=payload.get("quantile_model"),
-            )
-            return bundle, train_df, eval_df
-        except Exception as exc:
-            print(
-                "[WARN] Failed to load model artifact, fallback RandomForest will be used. "
-                f"Reason: {exc}"
-            )
+    # Explicit path: hard-fail on missing or unloadable artifact (no silent RF).
+    # RandomForest baseline only when model_path is None.
+    if model_path is not None:
+        bundle = load_model_bundle(Path(model_path))
+        return bundle, train_df, eval_df
 
     feature_names = [c for c in BASE_FEATURES if c in df.columns]
     scaler = StandardScaler()

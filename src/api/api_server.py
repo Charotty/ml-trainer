@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Union
 import numpy as np
 import logging
+import os
 import time
 import json
 from datetime import datetime
@@ -103,10 +104,24 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# CORS для работы с веб-клиентами
+# CORS: never combine allow_origins=["*"] with allow_credentials=True.
+# Explicit origins via CORS_ALLOW_ORIGINS (comma-separated), else localhost defaults.
+_cors_origins_env = os.environ.get("CORS_ALLOW_ORIGINS", "").strip()
+if _cors_origins_env:
+    _cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+else:
+    _cors_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

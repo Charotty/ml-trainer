@@ -50,6 +50,10 @@ def load_bundle(path: Path):
             "multitask_model": payload.get("multitask_model"),
             "multitask_blend": payload.get("multitask_blend"),
             "quantile_model": payload.get("quantile_model"),
+            "z_head": payload.get("z_head", "ensemble"),
+            "z_driver_names": payload.get("z_driver_names"),
+            "enrichment_mode": payload.get("enrichment_mode", "projection"),
+            "na_trend_store": payload.get("na_trend_store"),
         },
     )()
 

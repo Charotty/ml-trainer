@@ -1365,6 +1365,11 @@ def _adaptive_slice_selection(slice_infos: List[SliceInfo], max_slices: int, str
         return [sorted_slices[i] for i in indices]
 
 
+def _set_extractor_seed(seed: int) -> None:
+    """Make residual RNG calls deterministic (slice selection itself uses linspace)."""
+    np.random.seed(int(seed))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('dicom_root', nargs='?', help='Папка с DICOM исследованиями')
@@ -1372,12 +1377,16 @@ def main() -> int:
     parser.add_argument('--output', default='enhanced_ct_features.csv')
     parser.add_argument('--downsample', type=int, default=2)
     parser.add_argument('--max-slices', type=int, default=300)
+    parser.add_argument('--seed', type=int, default=42,
+                        help='RNG seed for any residual randomness (default 42)')
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--disable-kidney-segmentation', action='store_true')
     parser.add_argument('--kidney-only', action='store_true')
     parser.add_argument('--accuracy-mode', choices=['high', 'balanced', 'fast', 'minimal'], 
                        default='balanced', help='Режим точности: high(200 срезов), balanced(100), fast(50), minimal(25)')
     args = parser.parse_args()
+
+    _set_extractor_seed(args.seed)
 
     # Получаем параметры accuracy mode
     accuracy_params = _get_accuracy_params(args.accuracy_mode)

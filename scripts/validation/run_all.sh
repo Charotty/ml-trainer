@@ -15,7 +15,7 @@ if [[ -z "${RUN_ID}" ]]; then
 fi
 
 DATASET_PATH="${DATASET_PATH:-data/vybor_unified_features.csv}"
-MODEL_PATH="${MODEL_PATH:-models/adaptive_ensemble.pkl}"
+MODEL_PATH="${MODEL_PATH:-models/adaptive_ensemble_clinical_honest.pkl}"
 OUT_DIR="${OUT_DIR:-results/validation_runs}"
 NUM_CASES="${NUM_CASES:-8}"
 SEED="${SEED:-42}"
