@@ -1,0 +1,73 @@
+# CT Workbench Docker Compose
+#
+# CPU (по умолчанию):
+#   docker compose up -d --build
+#
+# GPU (TotalSegmentator):
+#   docker compose --profile gpu up -d --build workbench-gpu
+#
+# Модель должна лежать на хосте:
+#   models/adaptive_ensemble_clinical_honest.pkl
+
+services:
+  workbench:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ml-trainer-workbench:cpu
+    container_name: ml-trainer-workbench
+    ports:
+      - "8010:8010"
+    environment:
+      MODEL_PATH: /app/models/adaptive_ensemble_clinical_honest.pkl
+      CASES_ROOT: /data/cases
+      PYTHONPATH: /app
+    volumes:
+      - ./models/adaptive_ensemble_clinical_honest.pkl:/app/models/adaptive_ensemble_clinical_honest.pkl:ro
+      - workbench_cases:/data/cases
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8010/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  workbench-gpu:
+    profiles: ["gpu"]
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    image: ml-trainer-workbench:gpu
+    container_name: ml-trainer-workbench-gpu
+    ports:
+      - "8010:8010"
+    environment:
+      MODEL_PATH: /app/models/adaptive_ensemble_clinical_honest.pkl
+      CASES_ROOT: /data/cases
+      PYTHONPATH: /app
+      CUDA_VISIBLE_DEVICES: "0"
+    volumes:
+      - ./models/adaptive_ensemble_clinical_honest.pkl:/app/models/adaptive_ensemble_clinical_honest.pkl:ro
+      - workbench_cases:/data/cases
+      - totalseg_cache:/root/.totalsegmentator
+    gpus: all
+    # Fallback for environments that ignore the `gpus:` shorthand:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8010/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  workbench_cases:
+  totalseg_cache:

@@ -22,8 +22,15 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_PUBLIC = REPO_ROOT / "frontend" / "public"
 
-_storage = CaseStorage()
+_storage: Optional[CaseStorage] = None
 _predictor: Optional[ProductionPredictor] = None
+
+
+def get_storage() -> CaseStorage:
+    global _storage
+    if _storage is None:
+        _storage = CaseStorage()
+    return _storage
 
 
 def get_predictor() -> ProductionPredictor:
@@ -37,7 +44,7 @@ def create_app(
     storage: Optional[CaseStorage] = None,
     predictor_factory: Optional[Callable[[], ProductionPredictor]] = None,
 ) -> FastAPI:
-    store = storage or _storage
+    store = storage or get_storage()
     pred_fn = predictor_factory or get_predictor
 
     application = FastAPI(

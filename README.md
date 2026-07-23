@@ -37,12 +37,15 @@ GroupKFold-OOF на клинических парных метках из displa
 | Признаков | **121** |
 | Выборка | **n=87** |
 
-## Быстрый старт
+## Быстрый старт (локально)
 
 ```bash
 cd /path/to/ml-trainer
 pip install -r requirements.txt
+python -m uvicorn src.api.ct_workbench_api:app --host 0.0.0.0 --port 8010
 ```
+
+Открыть: http://127.0.0.1:8010/
 
 ### Обучение honest-модели
 
@@ -52,11 +55,92 @@ python scripts/data/train_clinical_honest.py --z-head ensemble
 
 Артефакт: `models/adaptive_ensemble_clinical_honest.pkl`.
 
-### Сравнение honest vs proxy
+## Развёртывание в Docker
+
+Ниже — рабочий путь для **CT Workbench** (UI + API на порту **8010**).  
+Модель в git обычно не лежит (`models/*.pkl` в `.gitignore`): файл должен быть на хосте и монтируется в контейнер.
+
+### Что нужно на машине
+
+1. [Docker Engine](https://docs.docker.com/engine/install/) + Docker Compose v2 (`docker compose version`).
+2. Файл модели: `models/adaptive_ensemble_clinical_honest.pkl`.
+3. Для GPU-профиля: NVIDIA GPU, драйвер и [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+
+### Структура Docker-файлов
+
+| Файл | Назначение |
+|------|------------|
+| `Dockerfile` | CPU-образ: API, UI, predict, PDF |
+| `Dockerfile.gpu` | GPU-образ: + CUDA PyTorch + TotalSegmentator |
+| `docker-compose.yml` | сервис `workbench` (CPU) и `workbench-gpu` (profile `gpu`) |
+| `requirements-docker.txt` | зависимости CPU-образа |
+| `.dockerignore` | исключает `dicexe/`, кейсы, venv, большие архивы |
+
+Переменные окружения:
+
+| Переменная | По умолчанию | Смысл |
+|------------|--------------|--------|
+| `MODEL_PATH` | `/app/models/adaptive_ensemble_clinical_honest.pkl` | путь к `.pkl` внутри контейнера |
+| `CASES_ROOT` | `/data/cases` | хранилище кейсов DICOM/артефактов |
+
+### Запуск CPU (рекомендуется для проверки)
 
 ```bash
-python scripts/validation/compare_proxy_vs_honest.py
+# из корня репозитория
+# убедитесь, что модель на месте:
+ls -lh models/adaptive_ensemble_clinical_honest.pkl
+
+docker compose up -d --build
 ```
+
+Проверка:
+
+```bash
+curl -s http://127.0.0.1:8010/health
+# ожидается: "status":"ok", "model_loaded":true, "feature_count":121
+```
+
+UI: http://127.0.0.1:8010/
+
+Остановка:
+
+```bash
+docker compose down
+```
+
+Кейсы сохраняются в Docker volume `workbench_cases` (не пропадают при пересборке образа).
+
+### Запуск GPU (полный analyze с TotalSegmentator)
+
+CPU-контейнер умеет API и прогноз; тяжёлая сегментация DICOM рассчитана на GPU-профиль:
+
+```bash
+# остановите CPU-сервис, если занимает порт 8010
+docker compose down
+
+docker compose --profile gpu up -d --build workbench-gpu
+curl -s http://127.0.0.1:8010/health
+```
+
+Первый запуск TotalSegmentator может скачать веса в volume `totalseg_cache`.
+
+### Типичные проблемы
+
+| Симптом | Что проверить |
+|---------|----------------|
+| `model_loaded: false` | есть ли `models/adaptive_ensemble_clinical_honest.pkl` на хосте и смонтирован ли volume |
+| порт занят | `docker compose down` или другой процесс на 8010 |
+| GPU не виден | `nvidia-smi` на хосте; установлен ли NVIDIA Container Toolkit; профиль `gpu` |
+| огромный контекст сборки | не убирайте `.dockerignore`; не кладите `dicexe/` и zip в корень без игнора |
+| analyze падает в CPU-образе | для сегментации нужен `workbench-gpu` |
+| UI не открывается с хоста в чистом WSL-Docker | проверьте `docker compose ps` и проброс портов; надёжнее Docker Desktop; health внутри контейнера: `docker compose exec workbench curl -s localhost:8010/health` |
+
+### Инженерные замечания по образу
+
+- В образ **не** копируются веса модели и `data/cases` — только код; модель и кейсы монтируются.
+- Один worker uvicorn: сегментация и joblib-модель не рассчитаны на многопроцессный sharing без доработки.
+- Healthcheck бьёт в `/health`.
+- Legacy API (`kidney_displacement_api`, порт 8000) этим compose **не** поднимается — канонический вход: CT Workbench `:8010`.
 
 ## Структура репозитория (основное)
 
@@ -68,8 +152,10 @@ src/features/               # feature engineering (в т.ч. na_trends)
 src/api/                    # FastAPI (legacy + CT Workbench)
 frontend/public/            # UI CT Workbench
 tests/                      # unit и интеграционные тесты
-results/validation_runs/    # артефакты прогонов
-docs/                       # отчёты и материалы для диссертации
+Dockerfile                  # CPU-образ Workbench
+Dockerfile.gpu              # GPU-образ Workbench
+docker-compose.yml
+docs/                       # отчёты и материалы
 ```
 
 ## CT Workbench UI
@@ -77,13 +163,12 @@ docs/                       # отчёты и материалы для дисс
 Браузерный интерфейс для загрузки supine-МСКТ, QA признаков и ML-прогноза смещения почек.
 
 - Спецификация: [`frontend/docs/PRD.md`](frontend/docs/PRD.md)
-- Запуск: `python -m uvicorn src.api.ct_workbench_api:app --port 8010` → http://127.0.0.1:8010/
+- Локально: `python -m uvicorn src.api.ct_workbench_api:app --port 8010`
+- Docker: см. раздел выше
 
 ## Важные замечания
 
-- **Proxy ≠ production:** proxy-эксперименты полезны для исследования, но clinical production — только honest-путь (`scripts/data/train_clinical_honest.py` → `models/adaptive_ensemble_clinical_honest.pkl`).
-- **KiTS опционален:** для honest-обучения KiTS не обязателен (тренды без `--with-kits`).
-- Операционный чеклист (staging → build → train → validate → API): [`docs/REPO_WORK_CHECKLIST.md`](docs/REPO_WORK_CHECKLIST.md).
-- Метрика по оси `Z` остаётся самым сложным местом (ошибка выше `X/Y`).
+- **Proxy ≠ production:** clinical production — honest-путь (`scripts/data/train_clinical_honest.py` → `models/adaptive_ensemble_clinical_honest.pkl`).
+- **KiTS опционален** для honest-обучения.
+- Операционный чеклист: [`docs/REPO_WORK_CHECKLIST.md`](docs/REPO_WORK_CHECKLIST.md).
 - Система исследовательская / вспомогательная; не заменяет клиническое решение врача.
-- Для публикаций и диссертационных разделов используйте отчёты из `docs/thesis/` и `docs/*.md`.

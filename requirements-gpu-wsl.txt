@@ -1,0 +1,29 @@
+# GPU WSL stack for /root/ml-trainer-venv (Ubuntu)
+# Torch: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+# Then: pip install -r requirements-gpu-wsl.txt
+
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128
+triton==3.6.0
+TotalSegmentator==2.16.0
+nnunetv2==2.8.1
+simpleitk==2.5.5
+pydicom==3.0.2
+nibabel==5.4.2
+dicom2nifti==2.6.2
+scikit-image==0.25.2
+dcm2niix==1.0.20260416
+numpy==2.2.6
+scipy==1.15.3
+pandas==2.3.3
+scikit-learn==1.5.2
+joblib==1.5.3
+matplotlib==3.10.9
+fastapi==0.139.2
+uvicorn==0.51.0
+httpx==0.28.1
+python-multipart==0.0.32
+pydantic==2.13.4
+reportlab==5.0.0
+pillow==12.2.0
+jsonschema==4.26.0
