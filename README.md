@@ -4,50 +4,43 @@ ML-проект для прогнозирования смещения поче�
 
 ## Что делает проект
 
-- обучает и валидирует модель смещения по 6 таргетам (`left/right` x `x,y,z`);
+- обучает и валидирует модель смещения по 6 таргетам (`left/right` × `x,y,z`);
 - использует production-пайплайн с `Adaptive Ensemble` и честной групповой валидацией;
+- включает клинические табличные признаки (пол, возраст, BMI, тип телосложения, предшествующие операции);
 - поддерживает clinical/honest и proxy-режимы экспериментов;
-- хранит отчеты в `results/validation_runs/` и текстовые сводки в `docs/`.
+- хранит отчёты в `results/validation_runs/` и текстовые сводки в `docs/`.
 
 ## Актуальная архитектура
 
 - **Основная модель:** `Adaptive Ensemble` (RF + Lasso + Ridge + GBT).
-- **Основной режим для клиники:** `na_trends` (когортные тренды из `na_spine` и `na_boku`).
+- **Артефакт production:** `models/adaptive_ensemble_clinical_honest.pkl` (**121** признак).
+- **Основной режим для клиники:** `na_trends` (когортные тренды из `na_spine` и `na_boku`) + клинические demographics.
 - **Валидация:** `GroupKFold(5)` с OOF-оценкой по пациентам.
 - **Ключевой скрипт обучения:** `scripts/data/train_clinical_honest.py`.
-- **Ключевые отчеты:**
+- **Ключевые отчёты:**
   - `docs/CLINICAL_VALIDATION_RUN_REPORT_20260630.md`
   - `docs/NA_TRENDS_PRODUCTION_REPORT.md`
   - `docs/SYSTEM_DATA_FLOW_SCHEME.md`
+  - `docs/REPO_WORK_CHECKLIST.md`
 
 ## Метрики (актуальный срез)
 
-> По вашей инструкции в README везде указан размер выборки `n=100`.
+GroupKFold-OOF на клинических парных метках из displacement XLSX.
 
 ### Клиническая валидация (production, na_trends)
 
 | Метрика | Значение |
 |---|---:|
-| Avg MAE | **8.40 мм** |
-| MAE X | 6.34 мм |
-| MAE Y | 7.45 мм |
-| MAE Z | 11.42 мм |
-| 95% CI (Avg MAE) | 7.71 - 9.15 мм |
-| Выборка | **n=100** |
-
-### Сравнение вариантов
-
-| Вариант | Avg MAE, мм | Комментарий |
-|---|---:|---|
-| Projection baseline | 8.49 | Старый per-patient projection join |
-| **na_trends (production)** | **8.40** | Архитектурно корректный текущий production-вариант |
-| na_trends + KiTS | 8.44 | KiTS-тренды не дали улучшения на OOF |
-| Proxy | 8.00 | Экспериментальный режим, не production |
+| Avg MAE | **8.52 мм** |
+| MAE Z | 11.63 мм |
+| 95% CI (Avg MAE) | 7.82 – 9.26 мм |
+| Признаков | **121** |
+| Выборка | **n=87** |
 
 ## Быстрый старт
 
 ```bash
-cd "D:/ml trainer"
+cd /path/to/ml-trainer
 pip install -r requirements.txt
 ```
 
@@ -56,6 +49,8 @@ pip install -r requirements.txt
 ```bash
 python scripts/data/train_clinical_honest.py --z-head ensemble
 ```
+
+Артефакт: `models/adaptive_ensemble_clinical_honest.pkl`.
 
 ### Сравнение honest vs proxy
 
@@ -66,13 +61,15 @@ python scripts/validation/compare_proxy_vs_honest.py
 ## Структура репозитория (основное)
 
 ```text
-models/                     # обученные модели
+models/                     # обученные модели (в т.ч. clinical_honest.pkl)
 scripts/data/               # обучение и подготовка датасетов
 scripts/validation/         # запуск валидации и сравнений
 src/features/               # feature engineering (в т.ч. na_trends)
+src/api/                    # FastAPI (legacy + CT Workbench)
+frontend/public/            # UI CT Workbench
 tests/                      # unit и интеграционные тесты
 results/validation_runs/    # артефакты прогонов
-docs/                       # отчеты и материалы для диссертации
+docs/                       # отчёты и материалы для диссертации
 ```
 
 ## CT Workbench UI
@@ -84,6 +81,9 @@ docs/                       # отчеты и материалы для дисс
 
 ## Важные замечания
 
-- Метрика по оси `Z` остается самым сложным местом (ошибка выше `X/Y`).
-- Proxy-эксперименты полезны для исследования, но не являются финальным clinical production.
-- Для публикаций и диссертационных разделов используйте отчеты из `docs/thesis/` и `docs/*.md`.
+- **Proxy ≠ production:** proxy-эксперименты полезны для исследования, но clinical production — только honest-путь (`scripts/data/train_clinical_honest.py` → `models/adaptive_ensemble_clinical_honest.pkl`).
+- **KiTS опционален:** для honest-обучения KiTS не обязателен (тренды без `--with-kits`).
+- Операционный чеклист (staging → build → train → validate → API): [`docs/REPO_WORK_CHECKLIST.md`](docs/REPO_WORK_CHECKLIST.md).
+- Метрика по оси `Z` остаётся самым сложным местом (ошибка выше `X/Y`).
+- Система исследовательская / вспомогательная; не заменяет клиническое решение врача.
+- Для публикаций и диссертационных разделов используйте отчёты из `docs/thesis/` и `docs/*.md`.

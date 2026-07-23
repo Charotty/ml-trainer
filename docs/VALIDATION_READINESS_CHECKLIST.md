@@ -2,6 +2,8 @@
 
 Use this checklist after each WSL run.
 
+For the full operational path (staging → build → train → validate → API), see [REPO_WORK_CHECKLIST.md](REPO_WORK_CHECKLIST.md).
+
 ## Technical readiness
 
 - [ ] WSL environment starts and enters `/mnt/d/ml\ trainer`.
@@ -12,7 +14,7 @@ Use this checklist after each WSL run.
 ## Analytical readiness
 
 - [ ] `metrics_per_target.csv` exists and contains all 6 targets.
-- [ ] `metrics_summary.csv` includes `mae_avg_mm`, `rmse_avg_mm`, `r2_avg`, `<5mm`, `<10mm`.
+- [ ] `metrics_summary.csv` includes `mae_avg_mm`, `rmse_avg_mm`, `r2_avg`, `within_5mm_ratio`, `within_10mm_ratio` (per-patient `vector_error_mean_mm`, not pointwise across 6 axes). Optional diagnostics: `within_5mm_pointwise_ratio`, `within_10mm_pointwise_ratio`.
 - [ ] `worst_cases.csv` is generated and sorted by error descending.
 - [ ] At least one visualization exists for each mode:
   - [ ] `single_case_3d`
