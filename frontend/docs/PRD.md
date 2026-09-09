@@ -164,9 +164,9 @@
 
 | Метрика | Референс | Источник |
 |---------|----------|----------|
-| Avg MAE (production) | ~8.40 мм GKF-OOF | [README.md](../../README.md) |
-| MAE Z | ~11.42 мм (ожидаемо выше) | [thesis/10](../../docs/thesis/10_CLINICAL_VALIDATION_AND_COMPARISON.md) |
-| Выборка в документации | n=100 | README (публичная формулировка) |
+| Avg MAE | не production; 8.40/8.49/8.52 мм — исторический GKF-OOF, не смешивать | [MODEL_CARD.md](../MODEL_CARD.md) |
+| MAE Z | исторические оценки выше оси X/Y; не winner | [MODEL_RELEASE_GATES.md](../MODEL_RELEASE_GATES.md) |
+| Выборка | n=87 clinical pairs for any future nested OOF | archive JSON cards |
 
 UI **не обязан** улучшать MAE на MVP — цель: воспроизвести production inference с QA.
 

@@ -116,67 +116,21 @@ def predict_targets(
     model_data: Mapping[str, Any],
     patient_data: Union[Mapping[str, object], pd.DataFrame],
 ) -> Dict[str, float]:
-    """Full inference: normalize → engineer → imputer → scaler → per-target predict."""
-    from src.models.left_z_calibrator import TARGET as LEFT_Z_TARGET
+    """Full inference via the shared ``src.models.runtime`` facade."""
+    from src.models.runtime import RuntimePredictor
 
-    feature_names = model_data["feature_names"]
-    X = build_inference_matrix(trainer, patient_data, feature_names=feature_names)
-    X_scaled = apply_model_preprocessing(X, model_data)
-    predictions: Dict[str, float] = {}
-    for target_name, model in model_data["models"].items():
-        predictions[target_name] = float(model.predict(X_scaled)[0])
-
-    side_z = model_data.get("side_z_models")
-    if side_z:
-        from src.models.side_z_predictor import LEFT_Z, RIGHT_Z
-
-        left_m = side_z.get("left") if isinstance(side_z, dict) else None
-        right_m = side_z.get("right") if isinstance(side_z, dict) else None
-        if left_m is not None and getattr(left_m, "fitted_", False):
-            predictions[LEFT_Z] = float(left_m.predict(X_scaled)[0])
-        if right_m is not None and getattr(right_m, "fitted_", False):
-            predictions[RIGHT_Z] = float(right_m.predict(X_scaled)[0])
-
-    calibrator = model_data.get("left_z_calibrator")
-    if calibrator is not None and LEFT_Z_TARGET in predictions:
-        if isinstance(patient_data, pd.DataFrame):
-            patient_df = patient_data
-        else:
-            patient_df = pd.DataFrame([dict(patient_data)])
-        predictions[LEFT_Z_TARGET] = calibrator.apply_scalar(
-            patient_df.iloc[0].to_dict(),
-            predictions[LEFT_Z_TARGET],
-        )
-
-    from src.models.right_z_calibrator import TARGET as RIGHT_Z_TARGET
-
-    right_calibrator = model_data.get("right_z_calibrator")
-    if right_calibrator is not None and RIGHT_Z_TARGET in predictions:
-        if isinstance(patient_data, pd.DataFrame):
-            patient_df = patient_data
-        else:
-            patient_df = pd.DataFrame([dict(patient_data)])
-        predictions[RIGHT_Z_TARGET] = right_calibrator.apply_scalar(
-            patient_df.iloc[0].to_dict(),
-            predictions[RIGHT_Z_TARGET],
-        )
-
-    multitask = model_data.get("multitask_model")
-    blend_cfg = model_data.get("multitask_blend") or {"z": 0.35, "xy": 0.15}
-    if multitask is not None and multitask.fitted_:
-        if isinstance(patient_data, pd.DataFrame):
-            patient_df = patient_data
-        else:
-            patient_df = pd.DataFrame([dict(patient_data)])
-        X_mt = build_inference_matrix(trainer, patient_df, feature_names=feature_names)
-        X_mt = apply_model_preprocessing(X_mt, model_data)
-        predictions = multitask.blend_with_point_predictions(
-            predictions,
-            X_mt,
-            z_blend=float(blend_cfg.get("z", 0.35)),
-            xy_blend=float(blend_cfg.get("xy", 0.15)),
-        )
-    return predictions
+    payload = dict(model_data)
+    if trainer is not None:
+        payload.setdefault("feature_names", getattr(trainer, "feature_names", None))
+        payload.setdefault("enrichment_mode", getattr(trainer, "enrichment_mode", "projection"))
+        store = getattr(trainer, "na_trend_store", None)
+        if payload.get("na_trend_store") is None and store is not None:
+            payload["na_trend_store"] = store.to_dict() if hasattr(store, "to_dict") else store
+        payload.setdefault("z_head", getattr(trainer, "z_head", "ensemble"))
+        payload.setdefault("z_driver_names", getattr(trainer, "z_driver_names", None))
+        payload.setdefault("categorical_encoder", getattr(trainer, "categorical_encoder_", None))
+        payload.setdefault("encode_categoricals", getattr(trainer, "encode_categoricals", False))
+    return RuntimePredictor.from_payload(payload).predict_targets(patient_data)
 
 
 def predict_quantiles(
@@ -185,17 +139,16 @@ def predict_quantiles(
     patient_data: Union[Mapping[str, object], pd.DataFrame],
 ) -> Dict[str, Dict[str, float]]:
     """Return P10/P50/P90 intervals per target when quantile_model is saved."""
-    quantile = model_data.get("quantile_model")
-    if quantile is None or not getattr(quantile, "fitted_", False):
-        return {}
-    feature_names = model_data["feature_names"]
-    if isinstance(patient_data, pd.DataFrame):
-        patient_df = patient_data
-    else:
-        patient_df = pd.DataFrame([dict(patient_data)])
-    X = build_inference_matrix(trainer, patient_df, feature_names=feature_names)
-    X_scaled = apply_model_preprocessing(X, model_data)
-    return quantile.predict_all(X_scaled)
+    from src.models.runtime import RuntimePredictor
+
+    payload = dict(model_data)
+    if trainer is not None:
+        payload.setdefault("feature_names", getattr(trainer, "feature_names", None))
+        payload.setdefault("enrichment_mode", getattr(trainer, "enrichment_mode", "projection"))
+        store = getattr(trainer, "na_trend_store", None)
+        if payload.get("na_trend_store") is None and store is not None:
+            payload["na_trend_store"] = store.to_dict() if hasattr(store, "to_dict") else store
+    return RuntimePredictor.from_payload(payload).predict_quantiles(patient_data)
 
 
 def print_canonical_flow() -> None:
@@ -210,7 +163,8 @@ def print_canonical_flow() -> None:
         "   python src/models/data_integration_fix.py",
         "",
         "3. Train ensemble:",
-        "   python models/phase1/adaptive_ensemble.py",
+        "   python -c \"from src.models.ensemble import AdaptiveEnsembleTrainer\"",
+        "   # or: python models/phase1/adaptive_ensemble.py (legacy shim)",
         "",
         "4. Validate (smoke + metrics):",
         "   python scripts/run_phase1_pipeline.py validate --run-id RUN_ID",

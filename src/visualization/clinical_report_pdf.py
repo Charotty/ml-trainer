@@ -1132,7 +1132,7 @@ def build_case_report_pdf(report: Mapping[str, Any], output_path: str | Path) ->
 
 def generate_sample_report(output_path: str | Path) -> Path:
     """Write a realistic demo PDF to ``output_path``."""
-    from src.api.cases.report_service import DISCLAIMER
+    from src.visualization.report_contract import DISCLAIMER
 
     report: Dict[str, Any] = {
         "schema_version": "ct_workbench_report_v1",

@@ -1,21 +1,23 @@
 # Отчёт: production-модель и когортные тренды (na_trends)
 
+> **Исторический отчёт.** Avg MAE 8.40 mm здесь — не-nested GKF-OOF, не текущая production-метрика. Победитель не выбран: [`MODEL_CARD.md`](MODEL_CARD.md).
+
 **Дата:** 2026-06-30  
 **Ветка:** `cursor/dicom-prep-pipeline`  
-**Production-модель:** `models/adaptive_ensemble_clinical_honest.pkl`  
+**Алиас (не победитель):** `models/adaptive_ensemble_clinical_honest.pkl`  
 **Скрипт обучения:** `scripts/data/train_clinical_honest.py --z-head ensemble`
 
 ---
 
 ## 1. Резюме
 
-Production-модель предсказывает 3D-смещение почек (ΔX, ΔY, ΔZ, мм) при переходе **supine → lateral** по **только supine-признакам**.
+Production-пайплайн (честные метки) предсказывает 3D-смещение почек (ΔX, ΔY, ΔZ, мм) при переходе **supine → lateral** по **только supine-признакам**. Цифры ниже — исторический GKF-OOF, не winner.
 
 | Показатель | Значение |
 |------------|----------|
 | Клинических пациентов | 87 |
-| Честная метрика | GroupKFold(5) OOF по пациенту |
-| **Avg MAE (production, na_trends)** | **8.40 mm** [7.71 – 9.15] *(best: spine+boku only)* |
+| Честная метрика (исторический протокол) | GroupKFold(5) OOF по пациенту |
+| **Avg MAE (исторический GKF-OOF, не production)** | **8.40 mm** [7.71 – 9.15] *(best: spine+boku only; MUST NOT mix with 8.49/8.52)* |
 | **Z avg MAE** | **11.42 mm** |
 | Признаков | 111 (52 trend) / 159 (104 trend + KiTS) |
 

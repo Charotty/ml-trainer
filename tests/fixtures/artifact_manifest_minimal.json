@@ -1,0 +1,49 @@
+{
+  "artifact_schema_version": "1.0.0",
+  "schema_version": "1.0.0",
+  "feature_schema_version": "phase1_v1",
+  "candidate_id": "fixture_f2_deadbeef",
+  "status": "candidate",
+  "production_winner": false,
+  "research_only": true,
+  "artifact_filename": "fixture_model.pkl",
+  "alias_path": "models/adaptive_ensemble_clinical_honest.pkl",
+  "source": "test_fixture",
+  "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "size_bytes": 128,
+  "git_commit": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+  "git_blob": null,
+  "run_id": "PLACEHOLDER",
+  "python_version": "3.12.10",
+  "sklearn_version": "1.5.2",
+  "joblib_version": "1.4.0",
+  "data_hashes": {},
+  "folds": null,
+  "oof_predictions": null,
+  "aggregated_metrics": null,
+  "subgroup_metrics": null,
+  "historical_oof_mae_mm_do_not_mix": [8.4, 8.49, 8.52],
+  "oof_metrics_note": "Historical GKF-OOF MAE figures 8.40 mm, 8.49 mm, and 8.52 mm MUST NOT be mixed until corrected nested OOF exists.",
+  "feature_count": 2,
+  "feature_names": ["kidney_left_center_x_rel", "body_width_mm"],
+  "target_names": ["kidney_left_delta_x"],
+  "ensemble_weights": {
+    "kidney_left_delta_x": {
+      "RandomForest": 0.75,
+      "Ridge": 0.25
+    }
+  },
+  "estimator_types": {
+    "kidney_left_delta_x": {
+      "RandomForest": "RandomForestRegressor",
+      "Ridge": "Ridge"
+    }
+  },
+  "calibrators_present": {
+    "left_z_calibrator": false,
+    "right_z_calibrator": false
+  },
+  "training_meta": {
+    "clinical_only": true
+  }
+}

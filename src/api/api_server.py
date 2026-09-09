@@ -19,14 +19,10 @@ from datetime import datetime
 from pathlib import Path
 import sys
 
-# Добавляем src в Python path
-src_path = Path(__file__).parent.parent
-sys.path.insert(0, str(src_path))
-
-from ar_system.kidney_ar_system import KidneyARSystem
-from validation.data_validator import DataValidator
-from metrics.clinical_metrics import ClinicalMetrics
-from system_logging.system_logger import SystemLogger
+from src.ar_system.kidney_ar_system import KidneyARSystem
+from src.validation.data_validator import DataValidator
+from src.metrics.clinical_metrics import ClinicalMetrics
+from src.system_logging.system_logger import SystemLogger
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)

@@ -8,6 +8,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from src.features.fold_categoricals import encode_sex_label
 from src.features.phase1_schema import BASE_FEATURES, TARGET_NAMES, normalize_dataframe
 
 DEFAULT_EXCEL_PATH = "data/train_displacement_dataset.csv"
@@ -34,14 +35,8 @@ def _parse_numeric_series(series: pd.Series) -> pd.Series:
 
 
 def _sex_to_vybor_code(value: object) -> float:
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return np.nan
-    text = str(value).strip().lower()
-    if text in {"м", "m", "male", "1", "1.0"}:
-        return 1.0
-    if text in {"ж", "f", "female", "2", "2.0"}:
-        return 2.0
-    return np.nan
+    """Canonical 1/2 sex code; unknown stays NaN (never 0)."""
+    return encode_sex_label(value)
 
 
 def _body_type_to_code(value: object) -> float:

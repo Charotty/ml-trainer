@@ -4,17 +4,11 @@ from typing import Dict, List, Tuple, Optional
 import logging
 import joblib
 from pathlib import Path
-import sys
 
-# Добавляем src в Python path
-src_path = Path(__file__).parent.parent
-sys.path.insert(0, str(src_path))
-
-# Импорты наших компонентов
-from geometry.kidney_model import KidneyGeometryModel, create_personal_kidney_model, get_fallback_model
-from coordinate_system.patient_coords import PatientCoordinateSystem, MultiLevelTransformer
-from preprocessing.unified_pipeline import UnifiedPreprocessingPipeline
-from reliability.confidence_constraints import (
+from src.geometry.kidney_model import KidneyGeometryModel, create_personal_kidney_model, get_fallback_model
+from src.coordinate_system.patient_coords import PatientCoordinateSystem, MultiLevelTransformer
+from src.preprocessing.unified_pipeline import UnifiedPreprocessingPipeline
+from src.reliability.confidence_constraints import (
     ConfidenceEstimator, AnatomicalConstraints, 
     FallbackHandler, TemporalSmoother
 )

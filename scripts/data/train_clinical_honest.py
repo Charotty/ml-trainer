@@ -13,20 +13,18 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import GroupKFold
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "models" / "phase1"))
-sys.path.insert(0, str(ROOT / "scripts" / "validation"))
 
-from adaptive_ensemble import AdaptiveEnsembleTrainer  # noqa: E402
-from common import compute_regression_table, predict_df  # noqa: E402
+from src.models.ensemble import AdaptiveEnsembleTrainer  # noqa: E402
 from src.data.xlsx_displacement_parser import DEFAULT_OUTPUT_CSV  # noqa: E402
 from src.features.na_trend_features import NaTrendStore  # noqa: E402
 from src.features.phase1_schema import TARGET_NAMES, normalize_dataframe  # noqa: E402
 from src.features.pipeline import apply_model_preprocessing, build_inference_matrix  # noqa: E402
+from src.models.artifact_manifest import apply_oof_to_manifest, oof_placeholder  # noqa: E402
+from src.models.nested_cv import evaluate_nested_groupkfold_oof  # noqa: E402
 from src.models.z_calibrator_oof import SideZCalibrator, fit_calibrator_oof_gated  # noqa: E402
 
 DEFAULT_MODEL_PATH = ROOT / "models" / "adaptive_ensemble_clinical_honest.pkl"
@@ -80,43 +78,29 @@ def evaluate_groupkfold_oof(
     *,
     z_head: str = "ensemble",
     na_trend_store: NaTrendStore | None = None,
+    n_splits: int = N_SPLITS,
+    estimator_profile: str = "production",
 ) -> dict:
-    """OOF predictions with patient GroupKFold (honest protocol, step 7)."""
-    name_col = "full_name" if "full_name" in df.columns else "case_id"
-    groups = df[name_col].astype(str).values
-    gkf = GroupKFold(n_splits=min(N_SPLITS, len(np.unique(groups))))
+    """Honest nested GroupKFold OOF (inner weight tuning). Not a proxy metric."""
 
-    oof = {t: np.full(len(df), np.nan) for t in TARGET_NAMES}
-    for train_idx, val_idx in gkf.split(df, df[TARGET_NAMES[0]], groups=groups):
-        tr = df.iloc[train_idx].reset_index(drop=True)
-        te = df.iloc[val_idx].reset_index(drop=True)
-        fold_trainer = AdaptiveEnsembleTrainer(
-            z_head=z_head,
-            enrichment_mode="na_trends",
-            na_trend_store=na_trend_store,
-        )
-        X_tr, X_te, y_tr, y_te = fold_trainer.prepare_training_data_split(tr, te)
-        g_tr = tr[name_col].astype(str).values
-        fold_trainer.train_and_evaluate_adaptive_ensembles(
-            X_tr, X_te, y_tr, y_te, groups=g_tr, fast_weights=True
-        )
-        pred = predict_df(_make_bundle(fold_trainer, None, None), te)
-        for t in TARGET_NAMES:
-            oof[t][val_idx] = pred[t].values
+    def trainer_factory(**kwargs):
+        params = {
+            "z_head": z_head,
+            "enrichment_mode": "na_trends" if na_trend_store is not None else "none",
+            "na_trend_store": na_trend_store,
+            "estimator_profile": estimator_profile,
+        }
+        params.update(kwargs)
+        return AdaptiveEnsembleTrainer(**params)
 
-    pred_df = pd.DataFrame(oof, index=df.index)
-    per_target = compute_regression_table(df[TARGET_NAMES], pred_df, list(TARGET_NAMES))
-    abs_err = pred_df[TARGET_NAMES].subtract(df[TARGET_NAMES]).abs().mean(axis=1).values
-    lo, hi = _bootstrap_ci(abs_err)
-    return {
-        "per_target_mae_mm": per_target.set_index("target")["mae_mm"].to_dict(),
-        "axis_mae_mm": _axis_summary(per_target),
-        "avg_mae_mm": float(per_target["mae_mm"].mean()),
-        "avg_mae_ci95": [lo, hi],
-        "z_avg_mae_mm": float(
-            per_target.loc[per_target["target"].isin(Z_TARGETS), "mae_mm"].mean()
-        ),
-    }
+    result = evaluate_nested_groupkfold_oof(
+        df,
+        trainer_factory=trainer_factory,
+        n_splits=n_splits,
+        na_trend_store=na_trend_store,
+        weight_mode="inner_groupkfold",
+    )
+    return result.to_report_dict()
 
 
 def _raw_z_preds(trainer: AdaptiveEnsembleTrainer, frame: pd.DataFrame, target: str) -> np.ndarray:
@@ -232,13 +216,13 @@ def main() -> int:
         enrichment_mode="na_trends",
         na_trend_store=na_trends,
     )
-    dummy_val = df.iloc[:1].copy()
-    X_train, X_val, y_train, y_val = trainer.prepare_training_data_split(df, dummy_val)
+    prepared = trainer.prepare_training_data_fit(df)
+    if prepared[0] is None:
+        raise RuntimeError("prepare_training_data_fit failed")
+    X_train, y_train = prepared
     print(f"[z] z_head={z_head}, drivers={len(trainer.z_driver_names)}")
     print(f"[step2] features={len(trainer.feature_names)} (leakage-free)")
-    trainer.train_and_evaluate_adaptive_ensembles(
-        X_train, X_val, y_train, y_val, groups=groups
-    )
+    trainer.fit_final(X_train, y_train, groups=groups, weight_mode="inner_groupkfold")
 
     left_cal = fit_calibrator_oof_gated(
         SideZCalibrator(side="left"),
@@ -276,8 +260,9 @@ def main() -> int:
             "boku_volume_fill": False,
             "projection_join_by_name": False,
             "leakage_features_excluded": True,
-            "weight_tuning": "GroupKFold",
-            "final_fit": "100pct_clinical_train",
+            "weight_tuning": "nested_inner_GroupKFold",
+            "final_fit": "100pct_clinical_train_fit_final",
+            "oof_protocol": "nested_groupkfold",
             "calibrators": "oof_gated_supine_only",
             "z_head": z_head,
         },
@@ -285,7 +270,18 @@ def main() -> int:
     joblib.dump(payload, model_path)
     print(f"[OK] saved {model_path}")
 
-    oof_metrics = evaluate_groupkfold_oof(df, z_head=z_head, na_trend_store=na_trends)
+    oof_report = evaluate_groupkfold_oof(df, z_head=z_head, na_trend_store=na_trends)
+    oof_metrics = {
+        k: oof_report[k]
+        for k in (
+            "per_target_mae_mm",
+            "axis_mae_mm",
+            "avg_mae_mm",
+            "avg_mae_ci95",
+            "z_avg_mae_mm",
+        )
+        if k in oof_report
+    }
     report = {
         "run_id": run_id,
         "model_path": str(model_path),
@@ -301,6 +297,16 @@ def main() -> int:
         "z_head": z_head,
         "z_driver_names": trainer.z_driver_names,
         "groupkfold_oof_87": oof_metrics,
+        "nested_groupkfold_oof": oof_report,
+    }
+    manifest_oof = apply_oof_to_manifest(oof_placeholder(protocol="nested_groupkfold"), oof_report)
+    report["artifact_oof"] = {
+        "folds": manifest_oof.get("folds"),
+        "oof_predictions": manifest_oof.get("oof_predictions"),
+        "aggregated_metrics": manifest_oof.get("aggregated_metrics"),
+        "oof_protocol": manifest_oof.get("oof_protocol"),
+        "oof_status": manifest_oof.get("oof_status"),
+        "oof_weight_mode": manifest_oof.get("oof_weight_mode"),
     }
     run_dir = ROOT / "results" / "validation_runs" / run_id / "metrics"
     run_dir.mkdir(parents=True, exist_ok=True)

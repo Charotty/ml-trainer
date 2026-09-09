@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(REPO_ROOT / "models" / "phase1"))
 
-from adaptive_ensemble import AdaptiveEnsembleTrainer  # noqa: E402
+from src.models.ensemble import AdaptiveEnsembleTrainer  # noqa: E402
 from src.features.ct_external_enrichment import (  # noqa: E402
     SPAN_COLS,
     compute_anatomical_extras,
@@ -58,6 +54,10 @@ _PASS_THROUGH_FEATURE_KEYS = list(
             "patient_position",
             "scan_position",
             "feature_frame",
+            "geometry_ood_x",
+            "geometry_ood_x_reasons",
+            "mid_sagittal_x",
+            "mid_sagittal_x_source",
         ]
     )
 )
@@ -98,7 +98,7 @@ def build_features_from_base(
     for i, name in enumerate(feature_names):
         all_features[name] = _json_safe(matrix[0, i])
     keep_cols = list(
-        dict.fromkeys([*BASE_FEATURES, *CLINICAL_DEMOGRAPHIC_FEATURES, "feature_frame"])
+        dict.fromkeys([*BASE_FEATURES, *CLINICAL_DEMOGRAPHIC_FEATURES, "feature_frame", "geometry_ood_x"])
     )
     base_out = {
         col: _json_safe(df[col].iloc[0]) for col in keep_cols if col in df.columns

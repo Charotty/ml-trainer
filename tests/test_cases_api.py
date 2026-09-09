@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -104,6 +105,19 @@ def test_predict_returns_503_when_model_missing(tmp_path: Path) -> None:
     pred = client.post(f"/api/v1/cases/{case_id}/predict")
     assert pred.status_code == 503
     assert "модель" in pred.json()["detail"].lower() or "Модель" in pred.json()["detail"]
+
+
+def test_health_reports_loaded_feature_count_not_a_winner(client: TestClient) -> None:
+    res = client.get("/health")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "ok"
+    assert body["model_loaded"] is True
+    assert body["feature_count"] == 2
+    blob = json.dumps(body).lower()
+    assert "winner" not in blob
+    assert "mae" not in blob
+    assert "8.52" not in blob
 
 
 def test_analyze_returns_503_when_model_missing(tmp_path: Path) -> None:

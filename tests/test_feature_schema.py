@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 from src.features.phase1_schema import (
     BASE_FEATURES,
     CLINICAL_DEMOGRAPHIC_FEATURES,
+    CROSS_FEATURES,
     ENGINEERED_FEATURES,
     OPTIONAL_METADATA_COLUMNS,
     TARGET_NAMES,
@@ -71,6 +72,37 @@ def test_schema_lists_match_training_contract():
     assert len(BASE_FEATURES) == 23
     assert len(ENGINEERED_FEATURES) == 13
     assert len(TARGET_NAMES) == 6
+
+
+def _yaml_str_list(text: str, key: str) -> list[str]:
+    items: list[str] = []
+    capturing = False
+    for line in text.splitlines():
+        if line.startswith(f"{key}:"):
+            capturing = True
+            continue
+        if capturing:
+            stripped = line.strip()
+            if stripped.startswith("- "):
+                items.append(stripped[2:].strip())
+            elif stripped == "" or stripped.startswith("#"):
+                continue
+            elif not line.startswith(" "):
+                break
+    return items
+
+
+def test_python_schema_syncs_with_yaml():
+    """Python constants are the runtime source; YAML must stay in sync."""
+    from src.features.phase1_schema import get_schema_yaml_path
+
+    text = get_schema_yaml_path().read_text(encoding="utf-8")
+    assert "schema_version: phase1_v1" in text
+    assert _yaml_str_list(text, "base_features") == BASE_FEATURES
+    assert _yaml_str_list(text, "engineered_features") == ENGINEERED_FEATURES
+    assert _yaml_str_list(text, "targets") == TARGET_NAMES
+    assert _yaml_str_list(text, "clinical_demographic_features") == CLINICAL_DEMOGRAPHIC_FEATURES
+    assert _yaml_str_list(text, "cross_features") == CROSS_FEATURES
 
 
 def test_clinical_demographic_features_are_model_inputs_not_optional_metadata():

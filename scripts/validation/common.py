@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Shared utilities for WSL validation workflows."""
+"""Shared utilities for WSL validation workflows.
+
+Prediction goes through ``src.models.runtime``. This module keeps dataset
+helpers and the optional RF baseline used only when ``model_path is None``.
+"""
 
 from __future__ import annotations
 
 import json
 import sys
 import warnings
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
@@ -22,53 +24,23 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.features.na_trend_features import NaTrendStore  # noqa: E402
 from src.features.phase1_schema import (  # noqa: E402
     BASE_FEATURES,
     TARGET_NAMES,
     normalize_dataframe,
 )
+from src.models.runtime import (  # noqa: E402
+    DEFAULT_MODEL_PATH_STR,
+    LEGACY_MODEL_NAME,
+    PredictorBundle,
+    bundle_from_payload,
+    load_model_bundle,
+    predict_df,
+    warn_if_legacy_model,
+)
 
 TARGET_COLUMNS: List[str] = list(TARGET_NAMES)
-
-# Canonical production artifact (honest clinical training with na_trends).
-DEFAULT_MODEL_PATH = ROOT / "models" / "adaptive_ensemble_clinical_honest.pkl"
-DEFAULT_MODEL_PATH_STR = "models/adaptive_ensemble_clinical_honest.pkl"
-LEGACY_MODEL_NAME = "adaptive_ensemble.pkl"
-
-
-def warn_if_legacy_model(model_path: Path | str | None) -> None:
-    """Emit a warning when the legacy adaptive_ensemble.pkl path is used."""
-    if model_path is None:
-        return
-    path = Path(model_path)
-    if path.name == LEGACY_MODEL_NAME:
-        warnings.warn(
-            f"Using legacy model path '{path}'. Prefer canonical "
-            f"'{DEFAULT_MODEL_PATH_STR}'.",
-            UserWarning,
-            stacklevel=2,
-        )
-
-
-@dataclass
-class PredictorBundle:
-    mode: str
-    feature_names: List[str]
-    target_names: List[str]
-    scaler: StandardScaler
-    models: Dict[str, object]
-    imputer: Optional[Any] = None
-    left_z_calibrator: Optional[Any] = None
-    right_z_calibrator: Optional[Any] = None
-    side_z_models: Optional[dict] = None
-    multitask_model: Optional[Any] = None
-    multitask_blend: Optional[dict] = None
-    quantile_model: Optional[Any] = None
-    z_head: str = "ensemble"
-    z_driver_names: Optional[List[str]] = None
-    enrichment_mode: str = "projection"
-    na_trend_store: Optional[Dict[str, Any]] = None
+DEFAULT_MODEL_PATH = ROOT / DEFAULT_MODEL_PATH_STR
 
 
 def ensure_run_dirs(base_output_dir: Path, run_id: str) -> Path:
@@ -109,39 +81,6 @@ def load_ct_features(path: Path) -> pd.DataFrame:
     return normalize_dataframe(pd.read_csv(path, low_memory=False))
 
 
-def load_model_bundle(model_path: Path) -> PredictorBundle:
-    """Load a pretrained displacement model artifact."""
-    model_path = Path(model_path)
-    warn_if_legacy_model(model_path)
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model not found: {model_path}")
-    payload = joblib.load(model_path)
-    return PredictorBundle(
-        mode="pretrained_adaptive_ensemble",
-        feature_names=payload["feature_names"],
-        target_names=list(payload.get("target_names", payload["models"].keys())),
-        scaler=payload["scaler"],
-        models=payload["models"],
-        imputer=payload.get("imputer"),
-        left_z_calibrator=payload.get("left_z_calibrator"),
-        right_z_calibrator=payload.get("right_z_calibrator"),
-        side_z_models=payload.get("side_z_models"),
-        multitask_model=payload.get("multitask_model"),
-        multitask_blend=payload.get("multitask_blend"),
-        quantile_model=payload.get("quantile_model"),
-        z_head=payload.get("z_head", "ensemble"),
-        z_driver_names=payload.get("z_driver_names"),
-        enrichment_mode=payload.get("enrichment_mode", "projection"),
-        na_trend_store=payload.get("na_trend_store"),
-    )
-
-
-def vector_norm(left_xyz: np.ndarray, right_xyz: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    left = np.linalg.norm(left_xyz, axis=1)
-    right = np.linalg.norm(right_xyz, axis=1)
-    return left, right
-
-
 def build_or_load_predictor(
     df: pd.DataFrame,
     model_path: Path | None,
@@ -156,8 +95,6 @@ def build_or_load_predictor(
     else:
         train_df, eval_df = train_test_split(df, test_size=test_size, random_state=seed)
 
-    # Explicit path: hard-fail on missing or unloadable artifact (no silent RF).
-    # RandomForest baseline only when model_path is None.
     if model_path is not None:
         bundle = load_model_bundle(Path(model_path))
         return bundle, train_df, eval_df
@@ -167,7 +104,6 @@ def build_or_load_predictor(
     x_train = scaler.fit_transform(train_df[feature_names].values)
     y_train = train_df[TARGET_COLUMNS]
     models: Dict[str, object] = {}
-
     for target in TARGET_COLUMNS:
         model = RandomForestRegressor(
             n_estimators=200,
@@ -176,7 +112,6 @@ def build_or_load_predictor(
         )
         model.fit(x_train, y_train[target].values)
         models[target] = model
-
     bundle = PredictorBundle(
         mode="fallback_random_forest",
         feature_names=feature_names,
@@ -187,93 +122,10 @@ def build_or_load_predictor(
     return bundle, train_df, eval_df
 
 
-def predict_df(bundle: PredictorBundle, df: pd.DataFrame) -> pd.DataFrame:
-    df_norm = normalize_dataframe(df)
-
-    if bundle.mode == "pretrained_adaptive_ensemble":
-        sys.path.insert(0, str(ROOT / "models" / "phase1"))
-        from adaptive_ensemble import AdaptiveEnsembleTrainer
-        from src.features.pipeline import apply_model_preprocessing, build_inference_matrix
-
-        trainer = AdaptiveEnsembleTrainer(
-            z_head=getattr(bundle, "z_head", "ensemble"),
-            enrichment_mode=getattr(bundle, "enrichment_mode", "projection"),
-            na_trend_store=(
-                NaTrendStore.from_dict(bundle.na_trend_store)
-                if getattr(bundle, "na_trend_store", None)
-                else None
-            ),
-        )
-        X = build_inference_matrix(
-            trainer, df_norm, feature_names=bundle.feature_names,
-        )
-        model_data = {
-            "imputer": bundle.imputer,
-            "scaler": bundle.scaler,
-            "models": bundle.models,
-        }
-        X_scaled = apply_model_preprocessing(X, model_data)
-        X_imputed = bundle.imputer.transform(X) if bundle.imputer is not None else X
-    else:
-        X_scaled = bundle.scaler.transform(df_norm[bundle.feature_names].values)
-        X_imputed = X_scaled
-
-    z_head = getattr(bundle, "z_head", "ensemble")
-    z_drivers = getattr(bundle, "z_driver_names", None) or []
-    from src.models.z_quantile_v7 import Z_TARGETS, predict_quantile_z
-
-    rows = {}
-    for target_name, model in bundle.models.items():
-        if z_head == "quantile_v7" and target_name in Z_TARGETS and z_drivers:
-            rows[target_name] = predict_quantile_z(
-                model, X_imputed, bundle.feature_names, z_drivers
-            )
-        else:
-            rows[target_name] = model.predict(X_scaled)
-    pred_df = pd.DataFrame(rows, index=df.index)
-
-    side_z = getattr(bundle, "side_z_models", None)
-    if side_z:
-        from src.models.side_z_predictor import LEFT_Z, RIGHT_Z
-
-        left_m = side_z.get("left") if isinstance(side_z, dict) else getattr(side_z, "left", None)
-        right_m = side_z.get("right") if isinstance(side_z, dict) else getattr(side_z, "right", None)
-        if left_m is not None and getattr(left_m, "fitted_", False):
-            pred_df[LEFT_Z] = left_m.predict(X_scaled)
-        if right_m is not None and getattr(right_m, "fitted_", False):
-            pred_df[RIGHT_Z] = right_m.predict(X_scaled)
-
-    if bundle.left_z_calibrator is not None:
-        from src.models.left_z_calibrator import TARGET as LEFT_Z_TARGET
-
-        if LEFT_Z_TARGET in pred_df.columns:
-            pred_df[LEFT_Z_TARGET] = bundle.left_z_calibrator.transform(
-                df_norm,
-                pred_df[LEFT_Z_TARGET].values,
-            )
-
-    if getattr(bundle, "right_z_calibrator", None) is not None:
-        from src.models.right_z_calibrator import TARGET as RIGHT_Z_TARGET
-
-        if RIGHT_Z_TARGET in pred_df.columns:
-            pred_df[RIGHT_Z_TARGET] = bundle.right_z_calibrator.transform(
-                df_norm,
-                pred_df[RIGHT_Z_TARGET].values,
-            )
-
-    if getattr(bundle, "multitask_model", None) is not None and getattr(
-        bundle.multitask_model, "fitted_", False
-    ):
-        blend = getattr(bundle, "multitask_blend", None) or {"z": 0.35, "xy": 0.15}
-        mt = bundle.multitask_model.predict(X_scaled)
-        z_blend = float(blend.get("z", 0.35))
-        xy_blend = float(blend.get("xy", 0.15))
-        for j, tgt in enumerate(bundle.target_names):
-            if tgt.endswith("_z") and z_blend <= 0.0:
-                continue
-            w = z_blend if tgt.endswith("_z") else xy_blend
-            pred_df[tgt] = (1.0 - w) * pred_df[tgt].values + w * mt[:, j]
-    return pred_df
+def vector_norm(left_xyz: np.ndarray, right_xyz: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    left = np.linalg.norm(left_xyz, axis=1)
+    right = np.linalg.norm(right_xyz, axis=1)
+    return left, right
 
 
 def compute_regression_table(
@@ -326,3 +178,23 @@ def save_manifest(
         json.dumps(manifest, indent=2),
         encoding="utf-8",
     )
+
+
+__all__ = [
+    "DEFAULT_MODEL_PATH",
+    "DEFAULT_MODEL_PATH_STR",
+    "LEGACY_MODEL_NAME",
+    "PredictorBundle",
+    "TARGET_COLUMNS",
+    "build_or_load_predictor",
+    "bundle_from_payload",
+    "compute_regression_table",
+    "ensure_run_dirs",
+    "load_ct_features",
+    "load_dataset",
+    "load_model_bundle",
+    "predict_df",
+    "save_manifest",
+    "vector_norm",
+    "warn_if_legacy_model",
+]

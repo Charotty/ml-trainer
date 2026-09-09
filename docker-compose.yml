@@ -8,6 +8,8 @@
 #
 # Модель должна лежать на хосте:
 #   models/adaptive_ensemble_clinical_honest.pkl
+# Это рабочий alias, не победитель: /health отдаёт feature_count загруженного
+# файла (сейчас 111 в working tree; git-архив — 121). Не трактовать как release.
 
 services:
   workbench:

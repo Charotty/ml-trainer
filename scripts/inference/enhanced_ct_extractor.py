@@ -37,6 +37,17 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 try:
+    from src.features.fold_categoricals import (
+        bmi_from_weight_height,
+        encode_sex_label,
+        parse_dicom_age,
+    )
+except ImportError:
+    bmi_from_weight_height = None  # type: ignore[assignment,misc]
+    encode_sex_label = None  # type: ignore[assignment,misc]
+    parse_dicom_age = None  # type: ignore[assignment,misc]
+
+try:
     from src.features.phase1_schema import normalize_record
 except ImportError:
     normalize_record = None  # type: ignore[assignment,misc]
@@ -170,110 +181,63 @@ def _estimate_slice_thickness_mm(slice_infos: List[SliceInfo]) -> Optional[float
 
 
 def _extract_demographics(ds) -> Dict[str, Optional[float]]:
-    """Извлечение демографических данных из DICOM (совместимо с kits19)"""
+    """Extract demographics from DICOM. Unknown fields stay None (not 0/50/25)."""
+    empty: Dict[str, Optional[float]] = {
+        "sex": None,
+        "age": None,
+        "bmi": None,
+        "scan_position": None,
+        "contrast_phase": None,
+        "slice_thickness": None,
+        "radiographic_size": None,
+        "pathologic_size": None,
+        "malignant": None,
+        "tumor_grade": None,
+        "tumor_histology_code": None,
+        "smoking_code": None,
+        "hospitalization_days": None,
+    }
+
+    def _nan_to_none(value: object) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(number):
+            return None
+        return number
+
     try:
-        # Пол (M=1, F=2 как в kits19)
-        sex = getattr(ds, 'PatientSex', None)
-        if sex:
-            sex = sex.upper().strip()
-            sex = 1.0 if sex == 'M' else (2.0 if sex == 'F' else 0.0)
-        else:
-            sex = 0.0
-        
-        # Возраст
-        age = getattr(ds, 'PatientAge', None)
-        if age:
-            age_str = str(age).strip()
-            # Извлекаем число из строки (поддержка форматов Y/M/W/D)
-            age_match = re.search(r'(\d+)', age_str)
-            age_num = float(age_match.group(1)) if age_match else 50.0
-            
-            # Конвертация единиц
-            unit_match = re.search(r'(\d+)([YMWD])', age_str)
-            if unit_match:
-                unit = unit_match.group(2)
-                if unit == 'Y':
-                    age = age_num
-                elif unit == 'M':
-                    age = age_num / 12.0
-                elif unit == 'W':
-                    age = age_num / 52.0
-                elif unit == 'D':
-                    age = age_num / 365.0
-                else:
-                    age = age_num
-            else:
-                age = age_num
-        else:
-            age = 50.0
-        
-        # Вес и рост
-        weight_kg = getattr(ds, 'PatientWeight', None)
-        height_m = getattr(ds, 'PatientSize', None)
-        
-        # ИМТ
-        bmi = None
-        if weight_kg is not None and height_m is not None and height_m > 0:
-            bmi = float(weight_kg) / float(height_m * height_m)
-        else:
-            bmi = 25.0  # Средний ИМТ по умолчанию
-        
-        # Позиция сканирования
-        scan_position = _extract_patient_position(ds)
-        if scan_position is None:
-            scan_position = 'supine'
-        
-        # Фаза контраста
-        contrast_phase = 'arterial'  # По умолчанию
-        
-        # Толщина среза
-        slice_thickness = getattr(ds, 'SliceThickness', None)
+        sex_raw = getattr(ds, "PatientSex", None)
+        sex = _nan_to_none(encode_sex_label(sex_raw) if encode_sex_label else np.nan)
+        age = _nan_to_none(parse_dicom_age(getattr(ds, "PatientAge", None)) if parse_dicom_age else np.nan)
+        bmi = _nan_to_none(
+            bmi_from_weight_height(
+                getattr(ds, "PatientWeight", None),
+                getattr(ds, "PatientSize", None),
+            )
+            if bmi_from_weight_height
+            else np.nan
+        )
+        slice_thickness = getattr(ds, "SliceThickness", None)
         if slice_thickness is not None:
-            slice_thickness = float(slice_thickness)
-        else:
-            slice_thickness = 1.0
-        
-        # Дополнительные поля из kits19
-        radiographic_size = 0.0  # Будет вычислено
-        pathologic_size = 0.0    # Будет вычислено
-        malignant = 0.0          # По умолчанию
-        tumor_grade = 0.0        # По умолчанию
-        tumor_histology_code = 0.0
-        smoking_code = 0.0
-        hospitalization_days = 0.0
-        
-        return {
-            'sex': sex,
-            'age': age,
-            'bmi': bmi,
-            'scan_position': scan_position,
-            'contrast_phase': contrast_phase,
-            'slice_thickness': slice_thickness,
-            'radiographic_size': radiographic_size,
-            'pathologic_size': pathologic_size,
-            'malignant': malignant,
-            'tumor_grade': tumor_grade,
-            'tumor_histology_code': tumor_histology_code,
-            'smoking_code': smoking_code,
-            'hospitalization_days': hospitalization_days,
-        }
+            slice_thickness = _nan_to_none(slice_thickness)
+        payload = dict(empty)
+        payload.update(
+            {
+                "sex": sex,
+                "age": age,
+                "bmi": bmi,
+                "scan_position": _extract_patient_position(ds),
+                "slice_thickness": slice_thickness,
+            }
+        )
+        return payload
     except Exception as e:
         print(f"Error extracting demographics: {e}")
-        return {
-            'sex': 0.0,
-            'age': 50.0,
-            'bmi': 25.0,
-            'scan_position': 'supine',
-            'contrast_phase': 'arterial',
-            'slice_thickness': 1.0,
-            'radiographic_size': 0.0,
-            'pathologic_size': 0.0,
-            'malignant': 0.0,
-            'tumor_grade': 0.0,
-            'tumor_histology_code': 0.0,
-            'smoking_code': 0.0,
-            'hospitalization_days': 0.0,
-        }
+        return dict(empty)
 
 
 def _extract_patient_position(ds) -> Optional[str]:

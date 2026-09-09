@@ -1,8 +1,41 @@
-"""DICOM / NIfTI geometry helpers for Phase 1 feature extraction (patient LPS mm)."""
+"""DICOM / NIfTI geometry helpers for Phase 1 feature extraction (patient LPS mm).
+
+Signed clinical-supine X contract
+=================================
+
+Extractor / DICOM space
+-----------------------
+- **LPS** (DICOM): +X toward patient left, +Y toward posterior, +Z toward superior.
+- **RAS** (3D Slicer): +X toward patient right, +Y toward anterior, +Z toward superior.
+  RAS is LPS with X and Y negated; the map is an involution (round-trip identity).
+
+Clinical Excel / Vybor supine frame (training)
+----------------------------------------------
+- Absolute clinical X for each kidney is **unsigned laterality**: distance from the
+  true mid-sagittal plane (vertebral ``spine_center_x`` when present, otherwise
+  patient/scanner origin X=0). Both kidneys sit on the same half-axis (~+60..+90 mm).
+- Relative features use the L/R kidney midpoint in *this* frame as origin::
+
+      kidney_{side}_center_x_rel = clinical_x[side] - midpoint_x
+
+  so left and right relative X are opposite signs of equal magnitude.
+- ``kidney_lr_sep_x = clinical_x[right] - clinical_x[left]`` (signed, not abs).
+- Y and Z are signed offsets from the same L/R midpoint (never abs).
+
+Forbidden: ``abs(kidney_x - kidney_midpoint_x)``
+------------------------------------------------
+Because ``mid = (L+R)/2``, ``|L-mid| == |R-mid|`` for every pair. Encoding those
+unsigned distances as the clinical X values forces::
+
+      left_rel_x == right_rel_x == 0
+      kidney_lr_sep_x == 0
+
+The degenerate helper is kept as ``unsigned_x_from_kidney_midpoint`` for tests.
+"""
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -38,9 +71,121 @@ def dicom_centroid_to_patient_mm(ds, centroid_row: float, centroid_col: float) -
     return dicom_pixel_to_patient_mm(ds, centroid_row, centroid_col)
 
 
+# Feature-frame id written by ``harmonize_ct_to_clinical_frame``.
+FEATURE_FRAME_CLINICAL_SIGNED_X = "clinical_midpoint_signed_x"
+# Legacy id from the abs-from-kidney-midpoint encoder (always-zero X rel/sep).
+FEATURE_FRAME_CLINICAL_UNSIGNED_X = "clinical_midpoint_unsigned_x"
+
+# Clinical train |x_rel| max is ~12 mm; 20 mm is the historical sanity bound.
+CLINICAL_X_REL_ABS_MAX_MM = 20.0
+CLINICAL_LR_SEP_X_ABS_MAX_MM = 40.0
+CLINICAL_TO_SPINE_MAX_MM = 40.0
+
+X_DISTRIBUTION_FEATURES: Tuple[str, ...] = (
+    "kidney_left_center_x_rel",
+    "kidney_right_center_x_rel",
+    "kidney_lr_sep_x",
+)
+
+
 def patient_kidney_side(kidney_x: float, spine_x: float) -> str:
     """LPS: patient-left kidney has larger X than spine."""
     return "left" if kidney_x >= spine_x else "right"
+
+
+def flip_lps_ras(coords: np.ndarray) -> np.ndarray:
+    """LPS ↔ RAS: negate X and Y. Involution (applying twice is identity)."""
+    out = np.asarray(coords, dtype=float).copy()
+    if out.ndim == 1:
+        out[0] *= -1.0
+        out[1] *= -1.0
+        return out
+    out[..., 0] *= -1.0
+    out[..., 1] *= -1.0
+    return out
+
+
+def unsigned_x_from_kidney_midpoint(left_x: float, right_x: float) -> Tuple[float, float]:
+    """Broken helper: unsigned distance of each kidney from the L/R X midpoint.
+
+    Algebraic identity: ``mid = (L+R)/2`` implies ``|L-mid| == |R-mid|`` always,
+    so the two returned values are equal and any later midpoint-relative encoding
+    collapses ``*_x_rel`` and ``kidney_lr_sep_x`` to zero.
+
+    Kept only to reproduce the defect in tests. Do not call from production.
+    """
+    mid_x = 0.5 * (float(left_x) + float(right_x))
+    return abs(float(left_x) - mid_x), abs(float(right_x) - mid_x)
+
+
+def resolve_mid_sagittal_x(
+    features: Mapping[str, object],
+    left_x: float,
+    right_x: float,
+) -> Tuple[float, str]:
+    """True mid-sagittal X in patient mm; never a freshly computed kidney midpoint.
+
+    Prefers vertebral ``spine_center_x`` (even when it happens to lie near the
+    kidney midpoint — that is anatomy, and keeps symmetric-about-spine cases at
+    rel X ≈ 0). Falls back to ``body_com_x``, then patient/scanner origin (0).
+    """
+    del left_x, right_x  # origin must not be derived from the L/R kidney pair
+    for key in ("spine_center_x", "body_com_x"):
+        value = _finite(features.get(key))
+        if value is not None:
+            return value, key
+    return 0.0, "patient_origin_x"
+
+
+def clinical_x_from_patient_x(
+    left_x: float,
+    right_x: float,
+    midline_x: float,
+) -> Tuple[float, float]:
+    """Map signed patient X (LPS or RAS) to clinical unsigned laterality.
+
+    ``clinical_x = |patient_x - midline_x|``. The midline must be the true
+    mid-sagittal plane, not the L/R kidney midpoint. Relative X is then the
+    *signed* offset of these values from their midpoint (see
+    ``harmonize_ct_to_clinical_frame``).
+    """
+    return abs(float(left_x) - float(midline_x)), abs(float(right_x) - float(midline_x))
+
+
+def signed_rel_from_clinical_pair(
+    left_xyz: np.ndarray,
+    right_xyz: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Spine = L/R midpoint; relative coords = kidney − spine (signed, no abs)."""
+    spine = 0.5 * (left_xyz + right_xyz)
+    return left_xyz - spine, right_xyz - spine, spine
+
+
+def flag_geometry_ood_x(
+    features: Mapping[str, object],
+    *,
+    x_rel_abs_max: float = CLINICAL_X_REL_ABS_MAX_MM,
+    lr_sep_abs_max: float = CLINICAL_LR_SEP_X_ABS_MAX_MM,
+    to_spine_max: float = CLINICAL_TO_SPINE_MAX_MM,
+) -> Tuple[bool, List[str]]:
+    """Return (is_ood, reasons) when X features leave the clinical train envelope."""
+    reasons: List[str] = []
+    left_rel = _finite(features.get("kidney_left_center_x_rel"))
+    right_rel = _finite(features.get("kidney_right_center_x_rel"))
+    sep = _finite(features.get("kidney_lr_sep_x"))
+    left_dist = _finite(features.get("kidney_left_to_spine_distance"))
+    right_dist = _finite(features.get("kidney_right_to_spine_distance"))
+    if left_rel is not None and abs(left_rel) > x_rel_abs_max:
+        reasons.append(f"kidney_left_center_x_rel={left_rel:.3f} exceeds ±{x_rel_abs_max}")
+    if right_rel is not None and abs(right_rel) > x_rel_abs_max:
+        reasons.append(f"kidney_right_center_x_rel={right_rel:.3f} exceeds ±{x_rel_abs_max}")
+    if sep is not None and abs(sep) > lr_sep_abs_max:
+        reasons.append(f"kidney_lr_sep_x={sep:.3f} exceeds ±{lr_sep_abs_max}")
+    if left_dist is not None and left_dist > to_spine_max:
+        reasons.append(f"kidney_left_to_spine_distance={left_dist:.3f} exceeds {to_spine_max}")
+    if right_dist is not None and right_dist > to_spine_max:
+        reasons.append(f"kidney_right_to_spine_distance={right_dist:.3f} exceeds {to_spine_max}")
+    return bool(reasons), reasons
 
 
 def voxels_to_patient_mm(affine: np.ndarray, ijk: np.ndarray) -> np.ndarray:
@@ -182,17 +327,22 @@ def _finite(value: object) -> Optional[float]:
 
 
 def harmonize_ct_to_clinical_frame(features: Dict[str, Optional[float]]) -> Dict[str, Optional[float]]:
-    """Map CT LPS kidney centers to the Vybor/Excel clinical feature frame.
+    """Map CT patient-mm kidney centers to the Vybor/Excel clinical feature frame.
 
-    Training positions store each kidney's X as a lateral distance from the
-    mid-sagittal plane (both sides ~+70 mm), then form spine as the L/R
-    midpoint and relative centers as kidney−spine. Raw CT LPS uses a signed
-    axis (left negative / right positive) and a vertebral spine anchor, which
-    makes ``*_to_spine_distance`` ~15–25× larger than train. Converting X to
-    unsigned lateral distance before the midpoint encoding restores train-scale
-    relative features.
+    X uses unsigned laterality from the true mid-sagittal plane, then a *signed*
+    midpoint encoding (see module docstring). Y/Z stay signed throughout.
+    ``abs(x - kidney_midpoint)`` is not used: that identity zeros relative X.
+
+    Expects raw patient-mm kidney centers (LPS or RAS). Rows already tagged
+    ``feature_frame=clinical_midpoint_signed_x`` are returned unchanged so a
+    second pass cannot treat the rewritten midpoint spine as a mid-sagittal origin.
     """
     out = dict(features)
+    if out.get("feature_frame") in (
+        FEATURE_FRAME_CLINICAL_SIGNED_X,
+        FEATURE_FRAME_CLINICAL_UNSIGNED_X,
+    ):
+        return out
     lx = _finite(out.get("kidney_left_center_x"))
     ly = _finite(out.get("kidney_left_center_y"))
     lz = _finite(out.get("kidney_left_center_z"))
@@ -202,16 +352,17 @@ def harmonize_ct_to_clinical_frame(features: Dict[str, Optional[float]]) -> Dict
     if None in (lx, ly, lz, rx, ry, rz):
         return out
 
-    mid_x = 0.5 * (lx + rx)
+    midline_x, midline_source = resolve_mid_sagittal_x(out, lx, rx)
+    left_clin_x, right_clin_x = clinical_x_from_patient_x(lx, rx, midline_x)
+
     mid_y = 0.5 * (ly + ry)
     mid_z = 0.5 * (lz + rz)
+    left_sup = np.array([left_clin_x, ly - mid_y, lz - mid_z], dtype=float)
+    right_sup = np.array([right_clin_x, ry - mid_y, rz - mid_z], dtype=float)
+    left_rel, right_rel, spine = signed_rel_from_clinical_pair(left_sup, right_sup)
 
-    left_sup = np.array([abs(lx - mid_x), ly - mid_y, lz - mid_z], dtype=float)
-    right_sup = np.array([abs(rx - mid_x), ry - mid_y, rz - mid_z], dtype=float)
-    spine = 0.5 * (left_sup + right_sup)
-    left_rel = left_sup - spine
-    right_rel = right_sup - spine
-
+    out["mid_sagittal_x"] = float(midline_x)
+    out["mid_sagittal_x_source"] = midline_source
     out["spine_center_x"] = float(spine[0])
     out["spine_center_y"] = float(spine[1])
     out["spine_center_z"] = float(spine[2])
@@ -238,10 +389,15 @@ def harmonize_ct_to_clinical_frame(features: Dict[str, Optional[float]]) -> Dict
     out["kidney_right_to_body_center_distance"] = float(
         np.linalg.norm(right_sup - np.array([out["body_com_x"], out["body_com_y"], out["body_com_z"]]))
     )
+    # Signed L/R separation in the clinical frame (right − left), not abs.
     out["kidney_lr_sep_x"] = float(right_sup[0] - left_sup[0])
     out["kidney_lr_sep_y"] = float(right_sup[1] - left_sup[1])
     out["kidney_lr_sep_z"] = float(right_sup[2] - left_sup[2])
-    out["feature_frame"] = "clinical_midpoint_unsigned_x"
+    out["feature_frame"] = FEATURE_FRAME_CLINICAL_SIGNED_X
+
+    is_ood, reasons = flag_geometry_ood_x(out)
+    out["geometry_ood_x"] = is_ood
+    out["geometry_ood_x_reasons"] = reasons
     return out
 
 

@@ -35,10 +35,9 @@ from sklearn.model_selection import GroupKFold
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "models" / "phase1"))
 sys.path.insert(0, str(ROOT / "scripts" / "validation"))
 
-from adaptive_ensemble import AdaptiveEnsembleTrainer  # noqa: E402
+from src.models.ensemble import AdaptiveEnsembleTrainer  # noqa: E402
 from common import (  # noqa: E402
     TARGET_COLUMNS,
     compute_regression_table,
@@ -294,8 +293,8 @@ def evaluate_clinical_gkf(clinical: pd.DataFrame, bundle) -> dict[str, Any]:
         fold_trainer = AdaptiveEnsembleTrainer()
         X_tr, X_te, y_tr, y_te = fold_trainer.prepare_training_data_split(tr, te)
         g_tr = tr[name_col].astype(str).values
-        fold_trainer.train_and_evaluate_adaptive_ensembles(
-            X_tr, X_te, y_tr, y_te, groups=g_tr, fast_weights=True
+        fold_trainer.evaluate_fold(
+            X_tr, X_te, y_tr, y_te, groups=g_tr, weight_mode="fixed_prior"
         )
         fold_bundle = type(
             "B",
@@ -320,7 +319,7 @@ def evaluate_clinical_gkf(clinical: pd.DataFrame, bundle) -> dict[str, Any]:
     z_targets = [t for t in TARGET_NAMES if t.endswith("_z")]
     return {
         "n_patients": len(clinical),
-        "protocol": f"GroupKFold({min(N_SPLITS, len(np.unique(groups)))}) OOF",
+        "protocol": f"fixed_prior_benchmark GroupKFold({min(N_SPLITS, len(np.unique(groups)))}) OOF (not production nested OOF)",
         "avg_mae_mm": float(per_target["mae_mm"].mean()),
         "z_avg_mae_mm": float(per_target.loc[per_target["target"].isin(z_targets), "mae_mm"].mean()),
         "per_target_mae_mm": per_target.set_index("target")["mae_mm"].to_dict(),

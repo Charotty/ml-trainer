@@ -67,8 +67,8 @@ data:
     lateral_file: "lateral_unpaired.csv"
     synthetic_generation_method: "gmm"  # gaussian, gmm, copula
 
-# Пути к моделям
-models:
+# Пути к артефактам (не путать с секцией models.types выше)
+artifacts:
   output_dir: "models/production"
   feature_names_file: "feature_names.json"
   target_names_file: "target_names.json"

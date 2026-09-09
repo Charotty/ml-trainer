@@ -1,9 +1,11 @@
 # Отчёт по прогонам валидации clinical_honest (2026-06-30)
 
+> **Исторический отчёт.** GKF-OOF MAE 8.40 / 8.49 / 8.52 мм **нельзя смешивать** и нельзя считать текущей production-точностью. Победитель **не** выбран. Актуальные карточки: [`MODEL_CARD.md`](MODEL_CARD.md), [`MODEL_RELEASE_GATES.md`](MODEL_RELEASE_GATES.md).
+
 **Ветка:** `cursor/dicom-prep-pipeline`  
 **Дата прогонов:** 2026-06-30  
 **Главная честная метрика:** GroupKFold(5) OOF на **87 клинических** пациентах (Vybor xlsx)  
-**Production-модель:** `models/adaptive_ensemble_clinical_honest.pkl`  
+**Алиас (не победитель):** `models/adaptive_ensemble_clinical_honest.pkl`  
 **Скрипт:** `scripts/data/train_clinical_honest.py --z-head ensemble`
 
 Связанные документы: [`DATA_ARCHITECTURE.md`](DATA_ARCHITECTURE.md), [`NA_TRENDS_PRODUCTION_REPORT.md`](NA_TRENDS_PRODUCTION_REPORT.md), [`PRODUCTION_SYSTEM_REPORT.md`](PRODUCTION_SYSTEM_REPORT.md), [`дисер.md`](дисер.md).
@@ -69,7 +71,7 @@
 
 \* Вариант E: в каждом fold train = clinical + KiTS + DICOM pseudo (weighted); OOF только на clinical.
 
-**Рекомендация production:** вариант **B** (`include_kits=False` по умолчанию).
+**Историческая рекомендация прогона 2026-06-30 (не действующий winner):** вариант **B**. Promotion заблокирован до исправленной nested OOF f111 vs f121.
 
 ---
 

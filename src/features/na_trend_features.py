@@ -82,6 +82,62 @@ class NaTrendStore:
     include_kits: bool = False
 
     @classmethod
+    def fit_from_frames(
+        cls,
+        *,
+        spine_df: pd.DataFrame | None = None,
+        boku_df: pd.DataFrame | None = None,
+        kits_df: pd.DataFrame | None = None,
+        include_kits: bool = False,
+        spine_path: str = "",
+        boku_path: str = "",
+        kits_path: str = "",
+    ) -> NaTrendStore:
+        """Fit cohort statistics from in-memory frames (train-fold safe)."""
+        spine = (
+            normalize_dataframe(spine_df) if spine_df is not None and len(spine_df) else pd.DataFrame()
+        )
+        boku = (
+            normalize_dataframe(boku_df) if boku_df is not None and len(boku_df) else pd.DataFrame()
+        )
+        kits = (
+            normalize_dataframe(kits_df) if kits_df is not None and len(kits_df) else pd.DataFrame()
+        )
+        store = cls(
+            spine_path=spine_path,
+            boku_path=boku_path,
+            kits_path=kits_path,
+            include_kits=bool(include_kits and len(kits)),
+            spine_rows=len(spine),
+            boku_rows=len(boku),
+            kits_rows=len(kits),
+        )
+        for col in TREND_COLUMNS:
+            if col in spine.columns:
+                store.supine_stats[col] = _robust_stats(spine[col])
+            if col in boku.columns:
+                store.lateral_stats[col] = _robust_stats(boku[col])
+            if col in kits.columns:
+                store.kits_stats[col] = _robust_stats(kits[col])
+
+        for target in TARGET_NAMES:
+            if target in kits.columns:
+                med = _robust_stats(kits[target]).get("median", np.nan)
+                if np.isfinite(med):
+                    store.kits_delta_medians[f"kits_cohort_median_{target}"] = float(med)
+
+        for side in POP_SHIFT_SIDES:
+            for axis in POP_SHIFT_AXES:
+                col = f"kidney_{side}_center_{axis}_rel"
+                sup = store.supine_stats.get(col, {}).get("median", np.nan)
+                lat = store.lateral_stats.get(col, {}).get("median", np.nan)
+                key = f"na_pop_shift_{side}_{axis}"
+                store.population_shift[key] = (
+                    float(lat - sup) if np.isfinite(sup) and np.isfinite(lat) else np.nan
+                )
+        return store
+
+    @classmethod
     def fit(
         cls,
         *,
@@ -104,44 +160,18 @@ class NaTrendStore:
                 Path(kits_path) if kits_path else DEFAULT_KITS_PATH,
                 FALLBACK_KITS_PATH,
             )
-        store = cls(
+        spine_df = pd.read_csv(sp_p) if sp_p else None
+        boku_df = pd.read_csv(bk_p) if bk_p else None
+        kits_df = pd.read_csv(kt_p) if kt_p else None
+        return cls.fit_from_frames(
+            spine_df=spine_df,
+            boku_df=boku_df,
+            kits_df=kits_df,
+            include_kits=bool(kt_p),
             spine_path=str(sp_p) if sp_p else "",
             boku_path=str(bk_p) if bk_p else "",
             kits_path=str(kt_p) if kt_p else "",
-            include_kits=bool(kt_p),
         )
-        spine_df = normalize_dataframe(pd.read_csv(sp_p)) if sp_p else pd.DataFrame()
-        boku_df = normalize_dataframe(pd.read_csv(bk_p)) if bk_p else pd.DataFrame()
-        kits_df = normalize_dataframe(pd.read_csv(kt_p)) if kt_p else pd.DataFrame()
-        store.spine_rows = len(spine_df)
-        store.boku_rows = len(boku_df)
-        store.kits_rows = len(kits_df)
-
-        for col in TREND_COLUMNS:
-            if col in spine_df.columns:
-                store.supine_stats[col] = _robust_stats(spine_df[col])
-            if col in boku_df.columns:
-                store.lateral_stats[col] = _robust_stats(boku_df[col])
-            if col in kits_df.columns:
-                store.kits_stats[col] = _robust_stats(kits_df[col])
-
-        for target in TARGET_NAMES:
-            if target in kits_df.columns:
-                med = _robust_stats(kits_df[target]).get("median", np.nan)
-                if np.isfinite(med):
-                    store.kits_delta_medians[f"kits_cohort_median_{target}"] = float(med)
-
-        for side in POP_SHIFT_SIDES:
-            for axis in POP_SHIFT_AXES:
-                col = f"kidney_{side}_center_{axis}_rel"
-                sup = store.supine_stats.get(col, {}).get("median", np.nan)
-                lat = store.lateral_stats.get(col, {}).get("median", np.nan)
-                key = f"na_pop_shift_{side}_{axis}"
-                store.population_shift[key] = (
-                    float(lat - sup) if np.isfinite(sup) and np.isfinite(lat) else np.nan
-                )
-
-        return store
 
     def trend_feature_names(self) -> list[str]:
         names = list(self.population_shift.keys())

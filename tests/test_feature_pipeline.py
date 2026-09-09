@@ -26,8 +26,7 @@ def test_normalize_raw_features_alias():
 
 
 def test_build_inference_matrix_requires_feature_names():
-    sys.path.insert(0, str(ROOT / "models" / "phase1"))
-    from adaptive_ensemble import AdaptiveEnsembleTrainer
+    from src.models.ensemble import AdaptiveEnsembleTrainer
 
     trainer = AdaptiveEnsembleTrainer()
     row = {c: 1.0 for c in BASE_FEATURES}
@@ -39,8 +38,7 @@ def test_build_inference_matrix_requires_feature_names():
 def test_build_feature_matrix_includes_clinical_demographics():
     """Feature rework: sex/age/bmi/body_type from the Vybor xlsx must reach
     the model's feature matrix, not just live unused in the CSV."""
-    sys.path.insert(0, str(ROOT / "models" / "phase1"))
-    from adaptive_ensemble import AdaptiveEnsembleTrainer
+    from src.models.ensemble import AdaptiveEnsembleTrainer
 
     trainer = AdaptiveEnsembleTrainer(enrichment_mode="none")
     row = {c: 1.0 for c in BASE_FEATURES}
@@ -58,4 +56,4 @@ def test_print_canonical_flow(capsys):
     print_canonical_flow()
     out = capsys.readouterr().out
     assert "enhanced_ct_extractor" in out
-    assert "adaptive_ensemble" in out
+    assert "AdaptiveEnsembleTrainer" in out
