@@ -65,6 +65,10 @@
 
     <section id="stepAnalyze" class="card wizard-step hidden" data-step="analyze">
       <h2>Анализ (extraction)</h2>
+      <label class="checkbox-label">
+        <input id="analyzeFast" type="checkbox" checked />
+        Быстрый TotalSegmentator (--fast). Снимите галочку для полной сегментации (дольше, точнее геометрия тела).
+      </label>
       <button id="btnAnalyze" type="button" disabled>Запустить extraction</button>
       <div id="progress" class="progress hidden" aria-live="polite" aria-atomic="true">
         <div class="bar"><div id="progressBar" class="bar-fill"></div></div>

@@ -11,7 +11,12 @@ import pandas as pd
 
 from src.data.excel_displacement_adapter import convert_excel_displacement_df
 from src.features.displacement_axis_features import CLINICAL_EXTRA_COLUMNS
-from src.features.phase1_schema import TARGET_NAMES, normalize_dataframe
+from src.features.phase1_schema import (
+    TARGET_NAMES,
+    filter_any_kidney_targets,
+    labeled_kidneys_series,
+    normalize_dataframe,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _DATA_XLSX = list((REPO_ROOT / "data").glob("*.xlsx"))
@@ -282,9 +287,15 @@ def build_vybor_from_xlsx(
     *,
     boku_path: Optional[Path | str] = None,
     delta_point: str = "middle",
-    require_complete_targets: bool = True,
+    require_complete_targets: bool = False,
+    require_any_kidney_targets: bool = True,
 ) -> pd.DataFrame:
-    """Parse xlsx, convert to Phase-1 schema, optionally enrich from na_boku."""
+    """Parse xlsx, convert to Phase-1 schema, optionally enrich from na_boku.
+
+    By default keeps single-kidney / unilaterally labeled rows (at least one
+    side with complete middle-point XYZ deltas). Set
+    ``require_complete_targets=True`` to restore the old both-kidneys filter.
+    """
     raw = parse_xlsx_raw_table(xlsx_path)
     converted = convert_excel_displacement_df(raw, delta_point=delta_point)
     converted = attach_clinical_extras(converted, raw)
@@ -311,14 +322,27 @@ def build_vybor_from_xlsx(
     if boku_path:
         converted = enrich_with_boku_volumes(converted, boku_path)
 
+    converted["labeled_kidneys"] = labeled_kidneys_series(converted)
+
     if require_complete_targets:
         before = len(converted)
         converted = converted.dropna(subset=list(TARGET_NAMES), how="any").copy()
         skipped = before - len(converted)
         if skipped:
             print(
-                f"[xlsx] Skipped {skipped} rows with incomplete middle-point deltas "
+                f"[xlsx] Skipped {skipped} rows without both-kidney middle deltas "
                 f"(kept {len(converted)})"
+            )
+    elif require_any_kidney_targets:
+        before = len(converted)
+        converted = filter_any_kidney_targets(converted)
+        skipped = before - len(converted)
+        both = int((converted["labeled_kidneys"] == "both").sum())
+        one = int(converted["labeled_kidneys"].isin(["left", "right"]).sum())
+        if skipped or one:
+            print(
+                f"[xlsx] Kept {len(converted)} rows with >=1 labeled kidney "
+                f"(both={both}, one-sided={one}; dropped {skipped} with no side)"
             )
 
     converted["source"] = "Vybor"

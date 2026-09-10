@@ -85,6 +85,7 @@ def _fitted_payload() -> dict:
         "target_names": list(TARGET_NAMES),
         "enrichment_mode": "none",
         "z_head": "ensemble",
+        "z_driver_names": [],
         "na_trend_store": None,
         "encode_categoricals": False,
     }

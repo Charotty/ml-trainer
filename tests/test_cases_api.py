@@ -23,7 +23,7 @@ def _mock_predictor():
     mock.payload = {
         "feature_names": ["kidney_left_center_x_rel", "body_width_mm"],
         "enrichment_mode": "na_trends",
-        "na_trend_store": None,
+        "na_trend_store": {},
     }
     mock.model_path = Path("mock.pkl")
     mock.enrichment_mode.return_value = "na_trends"
@@ -59,6 +59,8 @@ def test_create_case_and_predict_flow(client: TestClient, tmp_path: Path) -> Non
         "kidney_right_center_x_rel": 11.0,
         "kidney_right_center_y_rel": 21.0,
         "kidney_right_center_z_rel": 31.0,
+        "kidney_left_present": "present",
+        "kidney_right_present": "present",
         "body_width_mm": 300.0,
         "body_depth_mm": 200.0,
     }
@@ -133,3 +135,126 @@ def test_analyze_returns_503_when_model_missing(tmp_path: Path) -> None:
     storage.update_meta(case_id, status="uploaded")
     res = client.post(f"/api/v1/cases/{case_id}/analyze")
     assert res.status_code == 503
+
+
+def test_patch_lordosis_and_bmi_reach_predict(tmp_path: Path) -> None:
+    captured: dict[str, dict] = {}
+    mock = _mock_predictor()
+
+    def _predict_row(row):
+        captured["row"] = dict(row)
+        return {
+            "kidney_left_delta_x": 1.0,
+            "kidney_left_delta_y": 2.0,
+            "kidney_left_delta_z": 3.0,
+            "kidney_right_delta_x": 4.0,
+            "kidney_right_delta_y": 5.0,
+            "kidney_right_delta_z": 6.0,
+        }
+
+    mock.predict_row.side_effect = _predict_row
+    storage = CaseStorage(root=tmp_path / "cases")
+    application = create_app(storage=storage, predictor_factory=lambda: mock)
+    client = TestClient(application)
+    case_id = client.post("/api/v1/cases", json={"patient_label": "p3"}).json()["case_id"]
+    storage.write_json_artifact(
+        case_id,
+        "base_features.json",
+        {
+            "kidney_left_center_x_rel": 2.0,
+            "kidney_left_center_y_rel": 1.0,
+            "kidney_left_center_z_rel": -4.0,
+            "kidney_right_center_x_rel": -2.0,
+            "kidney_right_center_y_rel": 1.0,
+            "kidney_right_center_z_rel": -3.0,
+            "body_width_mm": 300.0,
+            "body_depth_mm": 200.0,
+        },
+    )
+    storage.update_meta(case_id, status="features_ready")
+
+    patched = client.patch(
+        f"/api/v1/cases/{case_id}/features/manual",
+        json={
+            "overrides": {
+                "lumbar_lordosis_deg": 69.3,
+                "bmi": 23.8,
+                "kidney_left_z_span_supine_mm": 90.4,
+                "kidney_left_z_delta_span_mm": 9.4,
+            },
+            "reason": "unit test",
+        },
+    )
+    assert patched.status_code == 200
+    base = patched.json()["base_features"]
+    assert base["lumbar_lordosis_deg"] == 69.3
+    assert base["bmi"] == 23.8
+    assert base["kidney_left_z_span_supine_mm"] == 90.4
+    assert "kidney_left_z_delta_span_mm" not in base
+
+    pred = client.post(f"/api/v1/cases/{case_id}/predict")
+    assert pred.status_code == 200
+    assert captured["row"]["lumbar_lordosis_deg"] == 69.3
+    assert captured["row"]["bmi"] == 23.8
+    assert "kidney_left_z_delta_span_mm" not in captured["row"]
+
+
+def test_predict_withholds_absent_kidney(tmp_path: Path) -> None:
+    mock = _mock_predictor()
+    storage = CaseStorage(root=tmp_path / "cases")
+    application = create_app(storage=storage, predictor_factory=lambda: mock)
+    client = TestClient(application)
+    case_id = client.post("/api/v1/cases", json={"patient_label": "one-kidney"}).json()["case_id"]
+    storage.write_json_artifact(
+        case_id,
+        "base_features.json",
+        {
+            "kidney_right_center_x_rel": 0.0,
+            "kidney_right_center_y_rel": 0.0,
+            "kidney_right_center_z_rel": 0.0,
+            "kidney_left_present": "absent",
+            "kidney_right_present": "present",
+            "body_width_mm": 300.0,
+            "body_depth_mm": 200.0,
+        },
+    )
+    storage.write_json_artifact(
+        case_id,
+        "features.json",
+        {"all_features": {}, "coverage_pct": 50.0, "missing_features": []},
+    )
+    storage.update_meta(case_id, status="features_ready")
+    pred = client.post(f"/api/v1/cases/{case_id}/predict")
+    assert pred.status_code == 200
+    body = pred.json()
+    assert body["laterality"]["left"] == "absent"
+    assert body["predictions"]["kidney_left_delta_z"] is None
+    assert body["predictions"]["kidney_right_delta_z"] == 6.0
+    assert "kidney_left_delta_x" in body["withheld_targets"]
+
+
+def test_analyze_fast_query_defaults_true(tmp_path: Path, monkeypatch) -> None:
+    seen: dict[str, bool] = {}
+
+    def _fake_start(storage, case_id, predictor, *, fast=True):
+        seen["fast"] = fast
+        return True
+
+    monkeypatch.setattr("src.api.cases.router.start_analyze", _fake_start)
+    monkeypatch.setattr("src.api.cases.router.is_analyze_running", lambda _cid: False)
+    storage = CaseStorage(root=tmp_path / "cases")
+    application = create_app(storage=storage, predictor_factory=_mock_predictor)
+    client = TestClient(application)
+    case_id = client.post("/api/v1/cases", json={}).json()["case_id"]
+    storage.update_meta(case_id, status="uploaded")
+
+    default = client.post(f"/api/v1/cases/{case_id}/analyze")
+    assert default.status_code == 200
+    assert default.json()["fast"] is True
+    assert seen["fast"] is True
+
+    full = client.post(f"/api/v1/cases/{case_id}/analyze?fast=false")
+    assert full.status_code == 200
+    assert full.json()["fast"] is False
+    assert seen["fast"] is False
+

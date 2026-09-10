@@ -32,6 +32,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional na_boku CSV for volume/length enrichment",
     )
     p.add_argument("--no-boku", action="store_true")
+    p.add_argument(
+        "--both-kidneys-only",
+        action="store_true",
+        help="Drop unilaterally labeled (single-kidney) rows",
+    )
     return p.parse_args()
 
 
@@ -42,12 +47,21 @@ def main() -> int:
         args.out,
         xlsx_path=args.xlsx,
         boku_path=boku,
+        require_complete_targets=bool(args.both_kidneys_only),
+        require_any_kidney_targets=not bool(args.both_kidneys_only),
+    )
+    labeled = (
+        df["labeled_kidneys"].value_counts(dropna=False).to_dict()
+        if "labeled_kidneys" in df.columns
+        else {}
     )
     manifest = {
         "source_xlsx": str(args.xlsx),
         "output_csv": str(args.out),
         "rows": int(len(df)),
         "complete_targets": int(df[TARGET_NAMES].notna().all(axis=1).sum()),
+        "any_kidney_targets": int(len(df)),
+        "labeled_kidneys": {str(k): int(v) for k, v in labeled.items()},
         "boku_enrichment": str(boku) if boku else None,
     }
     manifest_path = args.out.with_suffix(".manifest.json")

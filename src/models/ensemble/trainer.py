@@ -484,30 +484,66 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
         for i, target_name in enumerate(self.target_names):
             print(f"\n{target_name}:")
             print("-" * 50)
-            y_train_full = y_train[:, i]
-            y_test_target = y_test[:, i] if has_test else None
-            w_full = self._per_target_sample_weights(target_name, y_train_full, weights)
+            y_train_raw = np.asarray(y_train[:, i], dtype=float).reshape(-1)
+            tr_mask = np.isfinite(y_train_raw)
+            if int(tr_mask.sum()) < 2:
+                print(f"  SKIP: <2 finite labels ({int(tr_mask.sum())})")
+                continue
+            y_train_full = y_train_raw[tr_mask]
+            X_train_t = np.asarray(X_train)[tr_mask]
+            w_base = None if weights is None else np.asarray(weights, dtype=float).reshape(-1)[tr_mask]
+            groups_t = None if groups is None else np.asarray(groups)[tr_mask]
+            X_train_imp_t = (
+                None
+                if self._X_train_imputed is None
+                else np.asarray(self._X_train_imputed)[tr_mask]
+            )
+            y_test_target = None
+            X_test_t = None
+            X_val_imp_t = None
+            if has_test:
+                y_test_raw = np.asarray(y_test[:, i], dtype=float).reshape(-1)
+                te_mask = np.isfinite(y_test_raw)
+                if int(te_mask.sum()) == 0:
+                    has_test_t = False
+                else:
+                    has_test_t = True
+                    y_test_target = y_test_raw[te_mask]
+                    X_test_t = np.asarray(X_test)[te_mask]
+                    X_val_imp_t = (
+                        None
+                        if self._X_val_imputed is None
+                        else np.asarray(self._X_val_imputed)[te_mask]
+                    )
+            else:
+                has_test_t = False
+            w_full = self._per_target_sample_weights(target_name, y_train_full, w_base)
             fallback_pred = float(np.nanmedian(y_train_full)) if len(y_train_full) else 0.0
             if not np.isfinite(fallback_pred):
                 fallback_pred = 0.0
+            if int((~tr_mask).sum()):
+                print(
+                    f"  one-kidney/partial: using {int(tr_mask.sum())}/{len(tr_mask)} "
+                    "finite labels for this target"
+                )
 
             if (
                 self.z_head == "quantile_v7"
                 and target_name in {"kidney_left_delta_z", "kidney_right_delta_z"}
-                and self._X_train_imputed is not None
+                and X_train_imp_t is not None
                 and self.z_driver_names
             ):
                 from src.models.z_quantile_v7 import fit_quantile_z, predict_quantile_z
 
                 z_model, _ = fit_quantile_z(
-                    self._X_train_imputed,
+                    X_train_imp_t,
                     self.feature_names,
                     y_train_full,
                     self.z_driver_names,
                     sample_weight=w_full,
                 )
                 self.trained_models[target_name] = z_model
-                if not has_test or self._X_val_imputed is None:
+                if not has_test_t or X_val_imp_t is None:
                     results[target_name] = {
                         "Best_Single_Model": "QuantileRegressor_v7",
                         "Improvement_Optimized_vs_Standard": 0.0,
@@ -519,7 +555,7 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                 optimized_pred = self._sanitize_predictions(
                     predict_quantile_z(
                         z_model,
-                        self._X_val_imputed,
+                        X_val_imp_t,
                         self.feature_names,
                         self.z_driver_names,
                     ),
@@ -569,7 +605,7 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
             if self.model_kind in ("mean", "median") or self.model_kind in SINGLE_KIND_TO_NAME:
                 est_name, single = make_single_estimator(self.model_kind, base_models)
                 single.fit(
-                    X_train,
+                    X_train_t,
                     y_train_full,
                     **self._fit_kwargs_for_model(est_name, w_full),
                 )
@@ -577,7 +613,7 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                 self._optimized_weights[target_name] = {est_name: 1.0}
                 self._inner_fold_weight_traces[target_name] = [{est_name: 1.0}]
                 self._inner_weight_variance[target_name] = {est_name: 0.0}
-                if not has_test:
+                if not has_test_t:
                     results[target_name] = {
                         "Best_Single_Model": est_name,
                         "Improvement_Optimized_vs_Standard": 0.0,
@@ -586,7 +622,7 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                     }
                     print(f"  {est_name} fit_final (single estimator)")
                     continue
-                single_pred = self._sanitize_predictions(single.predict(X_test), fallback_pred)
+                single_pred = self._sanitize_predictions(single.predict(X_test_t), fallback_pred)
                 mae = mean_absolute_error(y_test_target, single_pred)
                 rmse = float(np.sqrt(mean_squared_error(y_test_target, single_pred)))
                 r2 = r2_score(y_test_target, single_pred)
@@ -607,22 +643,44 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                 total = sum(priors.get(n, 1.0) for n in base_models.keys()) or len(base_models)
                 optimized_weights = {n: priors.get(n, 1.0) / total for n in base_models.keys()}
             elif weight_mode == "inner_groupkfold":
-                optimized_weights = self._optimize_weights_groupkfold(
-                    base_models,
-                    X_train,
-                    y_train_full,
-                    groups,
-                    target_name,
-                    sample_weight=w_full,
-                )
+                n_groups_t = 0 if groups_t is None else len(np.unique(groups_t))
+                if n_groups_t < 2:
+                    print("  inner GroupKFold: <2 groups after NaN mask; random_split")
+                    if w_full is not None:
+                        X_wt, X_wv, y_wt, y_wv, w_wt, _w_wv = train_test_split(
+                            X_train_t, y_train_full, w_full, test_size=0.2, random_state=42
+                        )
+                    else:
+                        X_wt, X_wv, y_wt, y_wv = train_test_split(
+                            X_train_t, y_train_full, test_size=0.2, random_state=42
+                        )
+                        w_wt = None
+                    optimized_weights = self.optimize_ensemble_weights(
+                        base_models,
+                        X_wt,
+                        y_wt,
+                        X_wv,
+                        y_wv,
+                        target_name,
+                        sample_weight=w_wt,
+                    )
+                else:
+                    optimized_weights = self._optimize_weights_groupkfold(
+                        base_models,
+                        X_train_t,
+                        y_train_full,
+                        groups_t,
+                        target_name,
+                        sample_weight=w_full,
+                    )
             else:
                 if w_full is not None:
                     X_wt, X_wv, y_wt, y_wv, w_wt, _w_wv = train_test_split(
-                        X_train, y_train_full, w_full, test_size=0.2, random_state=42
+                        X_train_t, y_train_full, w_full, test_size=0.2, random_state=42
                     )
                 else:
                     X_wt, X_wv, y_wt, y_wv = train_test_split(
-                        X_train, y_train_full, test_size=0.2, random_state=42
+                        X_train_t, y_train_full, test_size=0.2, random_state=42
                     )
                     w_wt = None
                 optimized_weights = self.optimize_ensemble_weights(
@@ -640,9 +698,9 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
             )
             adaptive_ensemble = self.create_adaptive_voting_ensemble(base_models, target_name)
             standard_ensemble = self.create_standard_voting_ensemble(base_models)
-            self._fit_voting_ensemble(optimized_ensemble, X_train, y_train_full, w_full)
-            self._fit_voting_ensemble(adaptive_ensemble, X_train, y_train_full, w_full)
-            self._fit_voting_ensemble(standard_ensemble, X_train, y_train_full, w_full)
+            self._fit_voting_ensemble(optimized_ensemble, X_train_t, y_train_full, w_full)
+            self._fit_voting_ensemble(adaptive_ensemble, X_train_t, y_train_full, w_full)
+            self._fit_voting_ensemble(standard_ensemble, X_train_t, y_train_full, w_full)
             self.trained_models[target_name] = optimized_ensemble
 
             best_single_mae = float("inf")
@@ -652,7 +710,7 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                     if model_name in base_models:
                         cv_mae, cv_std = self.evaluate_model_cv(
                             base_models[model_name],
-                            X_train,
+                            X_train_t,
                             y_train_full,
                             model_name,
                             sample_weight=w_full,
@@ -662,7 +720,7 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
             self._best_single_maes[target_name] = (
                 None if not np.isfinite(best_single_mae) else best_single_mae
             )
-            if not has_test:
+            if not has_test_t:
                 results[target_name] = {
                     "Best_Single_Model": self.best_models[target_name],
                     "Improvement_Optimized_vs_Standard": 0.0,
@@ -673,13 +731,13 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                 continue
 
             optimized_pred = self._sanitize_predictions(
-                optimized_ensemble.predict(X_test), fallback_pred
+                optimized_ensemble.predict(X_test_t), fallback_pred
             )
             adaptive_pred = self._sanitize_predictions(
-                adaptive_ensemble.predict(X_test), fallback_pred
+                adaptive_ensemble.predict(X_test_t), fallback_pred
             )
             standard_pred = self._sanitize_predictions(
-                standard_ensemble.predict(X_test), fallback_pred
+                standard_ensemble.predict(X_test_t), fallback_pred
             )
             use_adaptive = not np.all(np.isfinite(optimized_pred))
             if select_on_test and not use_adaptive:

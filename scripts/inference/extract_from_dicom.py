@@ -56,6 +56,7 @@ from scripts.inference.dicom_prep import (  # noqa: E402
     discover_patient_cases,
     find_dcm2niix_executable,
     group_dicom_series,
+    is_zip_case,
     make_ascii_work_slug,
     prepare_case,
     resolve_totalsegmentator_device,
@@ -198,15 +199,46 @@ def _kidney_features_from_roi_mask(mask_path: Path, prefix: str) -> Dict[str, fl
         return {}
 
 
+def inspect_kidney_mask(mask_path: Path, prefix: str) -> Tuple[str, Dict[str, float]]:
+    """Return (mask_status, features) without collapsing empty vs missing."""
+    from src.features.laterality import (
+        MASK_STATUS_EMPTY,
+        MASK_STATUS_MISSING_FILE,
+        MASK_STATUS_OK,
+        MASK_STATUS_PARSE_ERROR,
+    )
+
+    if not mask_path.exists():
+        return MASK_STATUS_MISSING_FILE, {}
+    try:
+        feats = _kidney_features_from_roi_mask(mask_path, prefix)
+    except Exception:
+        return MASK_STATUS_PARSE_ERROR, {}
+    if not feats:
+        # Distinguish parse failure (logged inside loader) from a true empty mask.
+        try:
+            if nib is None:
+                return MASK_STATUS_PARSE_ERROR, {}
+            img = nib.load(str(mask_path))
+            empty = not np.any(img.get_fdata() > 0)
+            return (MASK_STATUS_EMPTY if empty else MASK_STATUS_PARSE_ERROR), {}
+        except Exception:
+            return MASK_STATUS_PARSE_ERROR, {}
+    return MASK_STATUS_OK, feats
+
+
 def extract_kidney_features_from_ts_output(output_folder: Path) -> Dict[str, float]:
-    result: Dict[str, float] = {}
+    from src.features.laterality import MASK_STATUS_NO_LABEL, MASK_STATUS_OK
+
+    result: Dict[str, Any] = {}
     for prefix, fname in (
         ("kidney_right", "kidney_right.nii.gz"),
         ("kidney_left", "kidney_left.nii.gz"),
     ):
-        mask_path = output_folder / fname
-        if mask_path.exists():
-            result.update(_kidney_features_from_roi_mask(mask_path, prefix))
+        status, feats = inspect_kidney_mask(output_folder / fname, prefix)
+        result[f"{prefix}_mask_status"] = status
+        if feats:
+            result.update(feats)
 
     seg_file = output_folder / "segmentation.nii.gz"
     if seg_file.exists() and nib is not None and kidney_features_from_mask is not None:
@@ -216,11 +248,14 @@ def extract_kidney_features_from_ts_output(output_folder: Path) -> Dict[str, flo
             affine = seg_img.affine
             zooms = tuple(float(z) for z in seg_img.header.get_zooms()[:3])
             for label_id, prefix in ((8, "kidney_right"), (9, "kidney_left")):
-                if any(k.startswith(prefix) for k in result):
+                if any(str(k).startswith(prefix) and k.endswith("_volume_cm3") for k in result):
                     continue
                 mask = seg_data == label_id
                 if np.any(mask):
                     result.update(kidney_features_from_mask(mask, affine, zooms, prefix))
+                    result[f"{prefix}_mask_status"] = MASK_STATUS_OK
+                elif result.get(f"{prefix}_mask_status") == "missing_file":
+                    result[f"{prefix}_mask_status"] = MASK_STATUS_NO_LABEL
         except Exception as exc:
             print(f"  combined segmentation parse error: {exc}")
     return result
@@ -244,7 +279,7 @@ def process_case(
     keep_temp: bool = False,
 ) -> Dict[str, Any]:
     case_folder = Path(case_folder)
-    case_id = case_id or case_folder.name
+    case_id = case_id or (case_folder.stem if is_zip_case(case_folder) else case_folder.name)
     work_slug = make_ascii_work_slug(case_id, index=case_index)
     print(f"\n[case] {case_id}  (work={work_slug})")
 
@@ -406,8 +441,10 @@ def collect_cases(
     *,
     layout: str,
     max_cases: Optional[int],
+    include_zip: bool = True,
+    zip_only: bool = False,
 ) -> List[Tuple[Path, str]]:
-    """Return ordered list of (case_folder, unique_case_id)."""
+    """Return ordered list of (case_path, unique_case_id). Paths may be folders or ``.zip``."""
     cases: List[Tuple[Path, str]] = []
     seen_paths: set[str] = set()
     used_ids: set[str] = set()
@@ -417,7 +454,7 @@ def collect_cases(
         if key in seen_paths:
             return
         seen_paths.add(key)
-        case_id = case.name
+        case_id = case.stem if is_zip_case(case) else case.name
         if case_id in used_ids:
             suffix = 2
             while f"{case_id} ({suffix})" in used_ids:
@@ -428,9 +465,19 @@ def collect_cases(
 
     for root in roots:
         if root.is_file():
-            add(root.parent)
+            if is_zip_case(root):
+                add(root)
+            else:
+                add(root.parent)
+            if max_cases and len(cases) >= max_cases:
+                return cases
             continue
-        for case in discover_patient_cases(root, layout=layout):
+        for case in discover_patient_cases(
+            root,
+            layout=layout,
+            include_zip=include_zip,
+            zip_only=zip_only,
+        ):
             add(case)
             if max_cases and len(cases) >= max_cases:
                 return cases
@@ -500,7 +547,13 @@ def run_job(
         print(f"  [skip] root not found: {root}")
         return
 
-    cases = collect_cases([root], layout=args.layout, max_cases=args.max_cases)
+    cases = collect_cases(
+        [root],
+        layout=args.layout,
+        max_cases=args.max_cases,
+        include_zip=not args.no_zip,
+        zip_only=args.zip_only,
+    )
     if not cases:
         print("  [skip] no cases found")
         return
@@ -603,6 +656,16 @@ def main() -> int:
     parser.add_argument("--temp-dir", default=None, help="Work dir for NIfTI/segmentation (default: system temp)")
     parser.add_argument("--layout", choices=["auto", "flat", "nested"], default="auto")
     parser.add_argument("--max-cases", type=int, default=None)
+    parser.add_argument(
+        "--zip-only",
+        action="store_true",
+        help="Only process top-level .zip archives under each root (e.g. F:/На спине)",
+    )
+    parser.add_argument(
+        "--no-zip",
+        action="store_true",
+        help="Skip top-level .zip archives during discovery",
+    )
     parser.add_argument("--canonical", action="store_true", help="Merge enhanced_ct_extractor body features")
     parser.add_argument("--accuracy-mode", default="balanced", choices=["high", "balanced", "fast", "minimal"])
     parser.add_argument("--no-segmentation", action="store_true", help="Skip TotalSegmentator")
@@ -652,6 +715,7 @@ def main() -> int:
     print("=" * 72)
     print(f"jobs: {[(str(r), str(o)) for r, o in jobs]}")
     print(f"layout: {args.layout}  device: {args.device}  accuracy: {args.accuracy_mode}")
+    print(f"zip_only: {args.zip_only}  include_zip: {not args.no_zip}")
     print(f"dcm2niix: {find_dcm2niix_executable() or 'NOT FOUND'}")
     print(f"TotalSegmentator: {'off' if args.no_segmentation else 'on'}  canonical: {args.canonical}")
     print(f"update_existing: {args.update_existing}  keep_temp: {args.keep_temp}")

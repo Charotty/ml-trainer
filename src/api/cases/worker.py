@@ -106,6 +106,7 @@ def run_analyze_job(
                 feature_names=list(predictor.payload["feature_names"]),
                 enrichment_mode=predictor.enrichment_mode(),
                 na_trend_store=predictor.payload.get("na_trend_store"),
+                payload=predictor.payload,
             )
             storage.write_json_artifact(case_id, "base_features.json", base_out)
             storage.write_json_artifact(
@@ -140,12 +141,18 @@ def run_analyze_job(
             with _lock:
                 _running.discard(case_id)
 
-    thread = threading.Thread(target=_job, daemon=True)
+    thread = threading.Thread(target=_job, daemon=False)
     thread.start()
 
 
-def start_analyze(storage: CaseStorage, case_id: str, predictor: ProductionPredictor) -> bool:
+def start_analyze(
+    storage: CaseStorage,
+    case_id: str,
+    predictor: ProductionPredictor,
+    *,
+    fast: bool = True,
+) -> bool:
     if is_analyze_running(case_id):
         return False
-    run_analyze_job(storage, case_id, predictor)
+    run_analyze_job(storage, case_id, predictor, fast=fast)
     return True

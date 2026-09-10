@@ -113,11 +113,21 @@ class SpanAnchorCalibrator:
     ) -> "SpanAnchorCalibrator":
         raw = np.asarray(raw_pred, dtype=float).reshape(-1)
         y = np.asarray(y_true, dtype=float).reshape(-1)
-        delta_span, z_rel = self._clinical_arrays(df)
-        self.train_mae_before_ = float(mean_absolute_error(y, raw))
-        self.params = self._grid_search(raw, delta_span, z_rel, y)
-        calibrated = self._apply(raw, delta_span, z_rel, self.params)
-        self.train_mae_after_ = float(mean_absolute_error(y, calibrated))
+        mask = np.isfinite(raw) & np.isfinite(y)
+        if int(mask.sum()) < 2:
+            self.params = SpanAnchorParams()
+            self.train_mae_before_ = float("nan")
+            self.train_mae_after_ = float("nan")
+            self.fitted_ = True
+            return self
+        df_f = df.iloc[np.where(mask)[0]].reset_index(drop=True)
+        raw_f = raw[mask]
+        y_f = y[mask]
+        delta_span, z_rel = self._clinical_arrays(df_f)
+        self.train_mae_before_ = float(mean_absolute_error(y_f, raw_f))
+        self.params = self._grid_search(raw_f, delta_span, z_rel, y_f)
+        calibrated = self._apply(raw_f, delta_span, z_rel, self.params)
+        self.train_mae_after_ = float(mean_absolute_error(y_f, calibrated))
         self.fitted_ = True
         return self
 

@@ -78,14 +78,32 @@ def summarize_oof(
     per_rmse = {}
     per_r2 = {}
     for t in cols:
-        yt = truth[t].to_numpy()
-        yp = pred[t].to_numpy()
-        per_target[t] = float(mean_absolute_error(yt, yp))
-        per_rmse[t] = float(np.sqrt(mean_squared_error(yt, yp)))
-        per_r2[t] = float(r2_score(yt, yp)) if len(yt) >= 2 else float("nan")
-    abs_err = pred[cols].subtract(truth[cols]).abs().mean(axis=1).to_numpy()
-    lo, hi = _bootstrap_ci(abs_err)
-    z_vals = [per_target[t] for t in cols if t in Z_TARGETS]
+        yt = truth[t].to_numpy(dtype=float)
+        yp = pred[t].to_numpy(dtype=float)
+        mask = np.isfinite(yt) & np.isfinite(yp)
+        if int(mask.sum()) == 0:
+            per_target[t] = float("nan")
+            per_rmse[t] = float("nan")
+            per_r2[t] = float("nan")
+            continue
+        per_target[t] = float(mean_absolute_error(yt[mask], yp[mask]))
+        per_rmse[t] = float(np.sqrt(mean_squared_error(yt[mask], yp[mask])))
+        per_r2[t] = float(r2_score(yt[mask], yp[mask])) if int(mask.sum()) >= 2 else float("nan")
+    err_parts = []
+    for idx in range(len(truth)):
+        vals = []
+        for t in cols:
+            yt = truth[t].iloc[idx]
+            yp = pred[t].iloc[idx]
+            if np.isfinite(yt) and np.isfinite(yp):
+                vals.append(abs(float(yp) - float(yt)))
+        if vals:
+            err_parts.append(float(np.mean(vals)))
+    abs_err = np.asarray(err_parts, dtype=float) if err_parts else np.asarray([np.nan])
+    lo, hi = _bootstrap_ci(abs_err[np.isfinite(abs_err)]) if np.isfinite(abs_err).any() else (float("nan"), float("nan"))
+    z_vals = [per_target[t] for t in cols if t in Z_TARGETS and np.isfinite(per_target[t])]
+    finite_maes = [v for v in per_target.values() if np.isfinite(v)]
+    finite_rmses = [v for v in per_rmse.values() if np.isfinite(v)]
     return {
         "per_target_mae_mm": per_target,
         "per_target_rmse_mm": per_rmse,
@@ -93,8 +111,8 @@ def summarize_oof(
         "axis_mae_mm": _axis_summary(per_target),
         "axis_rmse_mm": _axis_summary(per_rmse),
         "axis_r2": _axis_summary(per_r2),
-        "avg_mae_mm": float(np.mean(list(per_target.values()))),
-        "avg_rmse_mm": float(np.mean(list(per_rmse.values()))),
+        "avg_mae_mm": float(np.mean(finite_maes)) if finite_maes else float("nan"),
+        "avg_rmse_mm": float(np.mean(finite_rmses)) if finite_rmses else float("nan"),
         "avg_r2": float(np.nanmean(list(per_r2.values()))),
         "avg_mae_ci95": [lo, hi],
         "z_avg_mae_mm": float(np.mean(z_vals)) if z_vals else float("nan"),

@@ -361,3 +361,27 @@ def test_sanitize_body_size_drops_fov_crop():
     assert out["body_width_mm"] is None
     assert out["body_depth_mm"] is None
     assert out["body_area_mm2"] is None
+
+
+def test_solitary_right_kidney_encodes_zero_rel():
+    out = harmonize_ct_to_clinical_frame(
+        {
+            "kidney_right_center_x": 94.39,
+            "kidney_right_center_y": -4.32,
+            "kidney_right_center_z": 1605.78,
+            "body_width_mm": 320.0,
+            "body_depth_mm": 200.0,
+        }
+    )
+    assert out["solitary_kidney_side"] == "right"
+    assert out["kidney_right_center_x_rel"] == pytest.approx(0.0)
+    assert out["kidney_right_center_y_rel"] == pytest.approx(0.0)
+    assert out["kidney_right_center_z_rel"] == pytest.approx(0.0)
+    assert out["kidney_right_to_spine_distance"] == pytest.approx(0.0)
+    left_rel = out.get("kidney_left_center_x_rel")
+    assert left_rel is None or (isinstance(left_rel, float) and np.isnan(left_rel))
+    assert out.get("kidney_lr_sep_x") is None
+    assert out["spine_center_y"] == pytest.approx(0.0)
+    assert out["spine_center_z"] == pytest.approx(0.0)
+    assert out["spine_center_x"] == pytest.approx(abs(94.39))
+    assert out["feature_frame"] == FEATURE_FRAME_CLINICAL_SIGNED_X

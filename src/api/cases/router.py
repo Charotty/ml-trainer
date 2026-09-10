@@ -93,7 +93,7 @@ def create_cases_router(
             tmp_path.unlink(missing_ok=True)
 
     @router.post("/{case_id}/analyze")
-    def analyze_case(case_id: str) -> Dict[str, Any]:
+    def analyze_case(case_id: str, fast: bool = True) -> Dict[str, Any]:
         try:
             storage.get_meta(case_id)
         except FileNotFoundError as exc:
@@ -101,9 +101,14 @@ def create_cases_router(
         if is_analyze_running(case_id):
             return {"case_id": case_id, "status": "extracting", "message": "Job already running"}
         predictor = _require_predictor()
-        if not start_analyze(storage, case_id, predictor):
+        if not start_analyze(storage, case_id, predictor, fast=fast):
             raise HTTPException(status_code=409, detail="Analyze already running")
-        return {"case_id": case_id, "status": "extracting", "message": "Job started"}
+        return {
+            "case_id": case_id,
+            "status": "extracting",
+            "message": "Job started",
+            "fast": fast,
+        }
 
     @router.get("/{case_id}/status", response_model=CaseStatusResponse)
     def case_status(case_id: str) -> CaseStatusResponse:
@@ -165,6 +170,7 @@ def create_cases_router(
             feature_names=list(pred.payload["feature_names"]),
             enrichment_mode=pred.enrichment_mode(),
             na_trend_store=pred.payload.get("na_trend_store"),
+            payload=pred.payload,
         )
         storage.write_json_artifact(case_id, "base_features.json", base_out)
         storage.write_json_artifact(
@@ -185,10 +191,16 @@ def create_cases_router(
         if not base:
             raise HTTPException(status_code=400, detail="No features. Run analyze or manual input first.")
         pred = _require_predictor()
-        predictions = pred.predict_row(base)
-        from .predictor import assess_prediction_sanity
+        raw_predictions = pred.predict_row(base)
+        feat_doc = storage.read_json_artifact(case_id, "features.json") or {}
+        from .predictor import finalize_case_predictions
 
-        sanity_ok, warnings = assess_prediction_sanity(predictions)
+        predictions, sanity_ok, warnings, laterality, withheld = finalize_case_predictions(
+            row=base,
+            predictions=raw_predictions,
+            all_features=feat_doc.get("all_features") or {},
+            payload=pred.payload,
+        )
         storage.write_json_artifact(
             case_id,
             "prediction.json",
@@ -199,6 +211,8 @@ def create_cases_router(
                 "feature_count": pred.feature_count(),
                 "sanity_ok": sanity_ok,
                 "warnings": warnings,
+                "laterality": laterality,
+                "withheld_targets": withheld,
             },
         )
         storage.update_meta(case_id, status="predicted")
@@ -209,6 +223,8 @@ def create_cases_router(
             feature_count=pred.feature_count(),
             sanity_ok=sanity_ok,
             warnings=warnings,
+            laterality=laterality,
+            withheld_targets=withheld,
         )
 
     @router.get("/{case_id}/prediction")

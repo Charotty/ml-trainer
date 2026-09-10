@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
+from src.features.fold_categoricals import ALL_MISS_COLS, FoldCategoricalEncoder
 from src.features.phase1_schema import (
     BASE_FEATURES,
     SCHEMA_VERSION,
@@ -123,6 +124,37 @@ def warn_if_sklearn_mismatch(payload: Mapping[str, Any]) -> None:
     )
 
 
+_ENCODED_DUMMY_PREFIXES: tuple[str, ...] = ("sex_code_", "body_type_code_")
+_ENCODED_MISSING_NAMES: frozenset[str] = frozenset(
+    f"{col}_missing" for col in ALL_MISS_COLS
+)
+
+
+def payload_requires_categorical_encoder(feature_names: object) -> bool:
+    names = [str(n) for n in (feature_names or [])]
+    return any(
+        name.startswith(_ENCODED_DUMMY_PREFIXES) or name in _ENCODED_MISSING_NAMES
+        for name in names
+    )
+
+
+def reconstruct_categorical_encoder(feature_names: object) -> FoldCategoricalEncoder:
+    """Rebuild the fold encoder from persisted dummy/missing column names.
+
+    ``FoldCategoricalEncoder.fit`` only records column names from constants; it
+    does not learn data-dependent parameters. Reconstructing it restores the
+    train/serve contract without retraining the heads.
+    """
+    names = [str(n) for n in (feature_names or [])]
+    encoder = FoldCategoricalEncoder()
+    encoder.dummy_names = [
+        name for name in names if name.startswith(_ENCODED_DUMMY_PREFIXES)
+    ]
+    encoder.missing_names = [name for name in names if name in _ENCODED_MISSING_NAMES]
+    encoder.fitted_ = True
+    return encoder
+
+
 def _require(payload: Mapping[str, Any], key: str) -> Any:
     if key not in payload or payload[key] is None:
         raise ArtifactSchemaError(
@@ -175,6 +207,24 @@ def validate_runtime_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
             )
         if contract.get("scaler") is None and contract.get("scaler_type") is None:
             raise ArtifactSchemaError("preprocessing_contract missing scaler type")
+
+    if payload_requires_categorical_encoder(payload.get("feature_names")):
+        encoder = payload.get("categorical_encoder")
+        if encoder is None or not bool(getattr(encoder, "fitted_", False)):
+            raise ArtifactSchemaError(
+                "Artifact feature_names include encoded categoricals "
+                "(sex_code_*/body_type_code_/*_missing) but categorical_encoder "
+                "is missing or not fitted; refusing to impute a silent majority class."
+            )
+        if "encode_categoricals" in payload and not bool(payload.get("encode_categoricals")):
+            raise ArtifactSchemaError(
+                "encode_categoricals is False while encoded categorical columns "
+                "are in feature_names; refusing to skip the encoder."
+            )
+    if "z_driver_names" not in payload:
+        raise ArtifactSchemaError(
+            "Artifact missing required inference field 'z_driver_names'; refusing to guess."
+        )
     return payload
 
 

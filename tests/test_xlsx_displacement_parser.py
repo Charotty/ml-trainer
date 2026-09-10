@@ -32,7 +32,16 @@ def test_build_vybor_from_xlsx_clinical_rows():
     assert len(df) >= 80
     for col in TARGET_NAMES:
         assert col in df.columns
-        assert df[col].notna().all()
+    # Single-kidney / unilateral labels are kept: every row must have at least
+    # one complete kidney side, but contralateral targets may be NaN.
+    from src.features.phase1_schema import (
+        has_complete_left_targets,
+        has_complete_right_targets,
+    )
+
+    assert (has_complete_left_targets(df) | has_complete_right_targets(df)).all()
+    assert "labeled_kidneys" in df.columns
+    assert df["labeled_kidneys"].isin(["both", "left", "right"]).all()
 
 
 @pytest.mark.skipif(not DEFAULT_XLSX_PATH.exists(), reason="Main xlsx not present")

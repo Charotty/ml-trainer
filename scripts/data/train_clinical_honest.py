@@ -21,9 +21,14 @@ if str(ROOT) not in sys.path:
 from src.models.ensemble import AdaptiveEnsembleTrainer  # noqa: E402
 from src.data.xlsx_displacement_parser import DEFAULT_OUTPUT_CSV  # noqa: E402
 from src.features.na_trend_features import NaTrendStore  # noqa: E402
-from src.features.phase1_schema import TARGET_NAMES, normalize_dataframe  # noqa: E402
+from src.features.phase1_schema import (  # noqa: E402
+    TARGET_NAMES,
+    filter_any_kidney_targets,
+    normalize_dataframe,
+)
 from src.features.pipeline import apply_model_preprocessing, build_inference_matrix  # noqa: E402
 from src.models.artifact_manifest import apply_oof_to_manifest, oof_placeholder  # noqa: E402
+from src.models.ensemble.serializer import build_runtime_payload  # noqa: E402
 from src.models.nested_cv import evaluate_nested_groupkfold_oof  # noqa: E402
 from src.models.z_calibrator_oof import SideZCalibrator, fit_calibrator_oof_gated  # noqa: E402
 
@@ -191,8 +196,14 @@ def main() -> int:
     else:
         print(f"[data] using existing {vybor_path}")
     df = normalize_dataframe(pd.read_csv(vybor_path))
-    df = df.dropna(subset=list(TARGET_NAMES), how="any").reset_index(drop=True)
-    print(f"[data] clinical patients={len(df)}")
+    before = len(df)
+    df = filter_any_kidney_targets(df).reset_index(drop=True)
+    both = int(df[list(TARGET_NAMES)].notna().all(axis=1).sum())
+    print(
+        f"[data] clinical patients={len(df)} "
+        f"(both kidneys={both}, one-sided={len(df) - both}; "
+        f"dropped {before - len(df)} with no labeled side)"
+    )
 
     na_trends = NaTrendStore.fit(
         spine_path=args.spine_csv,
@@ -240,33 +251,32 @@ def main() -> int:
     )
     print(f"[step6] calibrators left={bool(left_cal)} right={bool(right_cal)}")
 
-    payload = {
-        "models": trainer.trained_models,
-        "scaler": trainer.scaler,
-        "imputer": trainer.imputer,
-        "feature_names": trainer.feature_names,
-        "target_names": trainer.target_names,
-        "left_z_calibrator": left_cal,
-        "right_z_calibrator": right_cal,
-        "z_head": z_head,
-        "z_driver_names": trainer.z_driver_names,
-        "enrichment_mode": "na_trends",
-        "na_trend_store": na_trends.to_dict(),
-        "training_meta": {
-            "clinical_only": True,
-            "kits_dicom_excluded_from_targets": True,
-            "na_spine_na_boku": "cohort_trends_only",
-            "kits_in_trends": na_trends.include_kits,
-            "boku_volume_fill": False,
-            "projection_join_by_name": False,
-            "leakage_features_excluded": True,
-            "weight_tuning": "nested_inner_GroupKFold",
-            "final_fit": "100pct_clinical_train_fit_final",
-            "oof_protocol": "nested_groupkfold",
-            "calibrators": "oof_gated_supine_only",
-            "z_head": z_head,
+    payload = build_runtime_payload(
+        trainer,
+        extras={
+            "left_z_calibrator": left_cal,
+            "right_z_calibrator": right_cal,
+            "na_trend_store": na_trends.to_dict(),
+            "training_meta": {
+                "clinical_only": True,
+                "kits_dicom_excluded_from_targets": True,
+                "na_spine_na_boku": "cohort_trends_only",
+                "kits_in_trends": na_trends.include_kits,
+                "boku_volume_fill": False,
+                "projection_join_by_name": False,
+                "leakage_features_excluded": True,
+                "weight_tuning": "nested_inner_GroupKFold",
+                "final_fit": "100pct_clinical_train_fit_final",
+                "oof_protocol": "nested_groupkfold",
+                "calibrators": "oof_gated_supine_only",
+                "z_head": z_head,
+            },
         },
-    }
+    )
+    if payload.get("categorical_encoder") is None:
+        raise RuntimeError(
+            "categorical_encoder was not fitted; refusing to save a silent-majority artifact"
+        )
     joblib.dump(payload, model_path)
     print(f"[OK] saved {model_path}")
 

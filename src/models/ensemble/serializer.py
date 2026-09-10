@@ -89,6 +89,12 @@ def build_runtime_payload(
         "categorical_encoder": getattr(trainer, "categorical_encoder_", None),
         "schema_version": ARTIFACT_SCHEMA_VERSION,
     }
+    try:
+        import sklearn
+
+        payload["sklearn_version"] = sklearn.__version__
+    except Exception:  # pragma: no cover
+        pass
     store = getattr(trainer, "na_trend_store", None)
     if store is not None and hasattr(store, "to_dict"):
         payload["na_trend_store"] = store.to_dict()

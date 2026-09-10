@@ -349,9 +349,50 @@ def harmonize_ct_to_clinical_frame(features: Dict[str, Optional[float]]) -> Dict
     rx = _finite(out.get("kidney_right_center_x"))
     ry = _finite(out.get("kidney_right_center_y"))
     rz = _finite(out.get("kidney_right_center_z"))
-    if None in (lx, ly, lz, rx, ry, rz):
-        return out
+    if None not in (lx, ly, lz, rx, ry, rz):
+        return _harmonize_two_kidney(out, lx, ly, lz, rx, ry, rz)
 
+    left_ok = None not in (lx, ly, lz)
+    right_ok = None not in (rx, ry, rz)
+    if left_ok ^ right_ok:
+        return _harmonize_solitary_kidney(
+            out,
+            side="left" if left_ok else "right",
+            px=lx if left_ok else rx,
+            py=ly if left_ok else ry,
+            pz=lz if left_ok else rz,
+        )
+    return out
+
+
+def _apply_body_com_from_spine(
+    out: Dict[str, Optional[float]],
+    spine: np.ndarray,
+) -> Tuple[float, float, float]:
+    width = _finite(out.get("body_width_mm"))
+    depth = _finite(out.get("body_depth_mm"))
+    com_x_off = (width * 0.02) if width is not None else 0.0
+    com_y_off = (depth * 0.06) if depth is not None else 0.0
+    body_com = (
+        float(spine[0] + com_x_off),
+        float(spine[1] + com_y_off),
+        float(spine[2]),
+    )
+    out["body_com_x"] = body_com[0]
+    out["body_com_y"] = body_com[1]
+    out["body_com_z"] = body_com[2]
+    return body_com
+
+
+def _harmonize_two_kidney(
+    out: Dict[str, Optional[float]],
+    lx: float,
+    ly: float,
+    lz: float,
+    rx: float,
+    ry: float,
+    rz: float,
+) -> Dict[str, Optional[float]]:
     midline_x, midline_source = resolve_mid_sagittal_x(out, lx, rx)
     left_clin_x, right_clin_x = clinical_x_from_patient_x(lx, rx, midline_x)
 
@@ -375,25 +416,59 @@ def harmonize_ct_to_clinical_frame(features: Dict[str, Optional[float]]) -> Dict
     out["kidney_left_to_spine_distance"] = float(np.linalg.norm(left_rel))
     out["kidney_right_to_spine_distance"] = float(np.linalg.norm(right_rel))
 
-    # Body COM offsets mirror excel_displacement_adapter defaults when depth/width exist.
-    width = _finite(out.get("body_width_mm"))
-    depth = _finite(out.get("body_depth_mm"))
-    com_x_off = (width * 0.02) if width is not None else 0.0
-    com_y_off = (depth * 0.06) if depth is not None else 0.0
-    out["body_com_x"] = float(spine[0] + com_x_off)
-    out["body_com_y"] = float(spine[1] + com_y_off)
-    out["body_com_z"] = float(spine[2])
-    out["kidney_left_to_body_center_distance"] = float(
-        np.linalg.norm(left_sup - np.array([out["body_com_x"], out["body_com_y"], out["body_com_z"]]))
-    )
-    out["kidney_right_to_body_center_distance"] = float(
-        np.linalg.norm(right_sup - np.array([out["body_com_x"], out["body_com_y"], out["body_com_z"]]))
-    )
-    # Signed L/R separation in the clinical frame (right − left), not abs.
+    body_com = _apply_body_com_from_spine(out, spine)
+    com_arr = np.array(body_com, dtype=float)
+    out["kidney_left_to_body_center_distance"] = float(np.linalg.norm(left_sup - com_arr))
+    out["kidney_right_to_body_center_distance"] = float(np.linalg.norm(right_sup - com_arr))
     out["kidney_lr_sep_x"] = float(right_sup[0] - left_sup[0])
     out["kidney_lr_sep_y"] = float(right_sup[1] - left_sup[1])
     out["kidney_lr_sep_z"] = float(right_sup[2] - left_sup[2])
     out["feature_frame"] = FEATURE_FRAME_CLINICAL_SIGNED_X
+    out["solitary_kidney_side"] = None
+
+    is_ood, reasons = flag_geometry_ood_x(out)
+    out["geometry_ood_x"] = is_ood
+    out["geometry_ood_x_reasons"] = reasons
+    return out
+
+
+def _harmonize_solitary_kidney(
+    out: Dict[str, Optional[float]],
+    *,
+    side: str,
+    px: float,
+    py: float,
+    pz: float,
+) -> Dict[str, Optional[float]]:
+    """Match Excel one-kidney encoding: spine sits on the present kidney, rel = 0.
+
+    Cross-kidney features (lr_sep, contralateral rel) stay unset so the imputer
+    cannot invent a second kidney's geometry. Present-side heads still run.
+    """
+    midline_x, midline_source = resolve_mid_sagittal_x(out, px, px)
+    clin_x = abs(float(px) - float(midline_x))
+    # Y/Z are already relative-to-self (Excel nanmean of one kidney → rel=0).
+    # Keep spine Y/Z at 0 like the two-kidney CT path, so LPS slice Z (~1600 mm)
+    # does not leak into spine_center_*.
+    present_sup = np.array([clin_x, 0.0, 0.0], dtype=float)
+    spine = present_sup.copy()
+
+    out["mid_sagittal_x"] = float(midline_x)
+    out["mid_sagittal_x_source"] = midline_source
+    out["spine_center_x"] = float(spine[0])
+    out["spine_center_y"] = float(spine[1])
+    out["spine_center_z"] = float(spine[2])
+    out[f"kidney_{side}_center_x_rel"] = 0.0
+    out[f"kidney_{side}_center_y_rel"] = 0.0
+    out[f"kidney_{side}_center_z_rel"] = 0.0
+    out[f"kidney_{side}_to_spine_distance"] = 0.0
+
+    body_com = _apply_body_com_from_spine(out, spine)
+    out[f"kidney_{side}_to_body_center_distance"] = float(
+        np.linalg.norm(present_sup - np.array(body_com, dtype=float))
+    )
+    out["feature_frame"] = FEATURE_FRAME_CLINICAL_SIGNED_X
+    out["solitary_kidney_side"] = side
 
     is_ood, reasons = flag_geometry_ood_x(out)
     out["geometry_ood_x"] = is_ood

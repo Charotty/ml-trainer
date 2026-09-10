@@ -70,12 +70,29 @@ def _fitted_payload() -> dict:
         "target_names": list(TARGET_NAMES),
         "enrichment_mode": "none",
         "z_head": "ensemble",
+        "z_driver_names": [],
         "na_trend_store": None,
         "encode_categoricals": False,
     }
 
 
-def test_incompatible_schema_hard_fails() -> None:
+def test_missing_categorical_encoder_hard_fails() -> None:
+    payload = _fitted_payload()
+    payload["feature_names"] = list(BASE_FEATURES) + ["sex_code_1", "sex_missing"]
+    payload["encode_categoricals"] = True
+    with pytest.raises(ArtifactSchemaError, match="categorical_encoder"):
+        validate_runtime_payload(payload)
+
+
+def test_reconstructed_encoder_satisfies_contract() -> None:
+    from src.models.runtime import reconstruct_categorical_encoder
+
+    payload = _fitted_payload()
+    payload["feature_names"] = list(BASE_FEATURES) + ["sex_code_1", "sex_missing"]
+    payload["encode_categoricals"] = True
+    payload["categorical_encoder"] = reconstruct_categorical_encoder(payload["feature_names"])
+    validate_runtime_payload(payload)
+    assert payload["categorical_encoder"].fitted_ is True
     payload = _fitted_payload()
     payload["artifact_schema_version"] = "9.9.9"
     with pytest.raises(ArtifactSchemaError, match="Incompatible artifact_schema_version"):

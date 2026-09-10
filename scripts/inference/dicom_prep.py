@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import time
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -512,55 +513,116 @@ def _dir_has_direct_series(folder: Path, min_slices: int = _MIN_SERIES_SLICES) -
     return count_candidate_slices_direct(folder) >= min_slices
 
 
-def discover_patient_cases(root: Path, layout: str = "auto", max_unwrap_depth: int = 6) -> List[Path]:
+def discover_patient_cases(
+    root: Path,
+    layout: str = "auto",
+    max_unwrap_depth: int = 6,
+    *,
+    include_zip: bool = True,
+    zip_only: bool = False,
+) -> List[Path]:
     """
-    Discover one folder per patient case under a DICOM root.
+    Discover one folder or ``.zip`` per patient case under a DICOM root.
 
-    Handles two real-world layouts:
-      * flat (F:/На Боку): root -> 109 patient folders -> numeric image dir
-      * nested (F:/На спине): root -> single archive wrapper -> per-patient
-        folders -> (numeric dir | PACS PA*/ST*/SE* tree)
-
-    ``layout='flat'`` forces the direct children of ``root``. ``auto`` / ``nested``
-    unwrap single grouping wrappers until the level with >= 2 sibling patient
-    folders is reached.
+    Handles:
+      * flat (F:/На Боку): root -> patient folders
+      * nested (F:/На спине): wrapper -> patient folders
+      * zip archives at root (F:/На спине/*.zip) — extracted per-case in ``prepare_case``
     """
     root = Path(root)
     if not root.exists():
         return []
+    if is_zip_case(root):
+        return [root]
     if not root.is_dir():
         return [root]
 
+    zip_cases = discover_zip_cases(root) if include_zip or zip_only else []
+    if zip_only:
+        return zip_cases
+
+    dir_cases: List[Path] = []
     if layout == "flat":
-        return sorted(c for c in root.iterdir() if c.is_dir() and has_ct_series_subtree(c))
+        dir_cases = sorted(c for c in root.iterdir() if c.is_dir() and has_ct_series_subtree(c))
+    else:
+        node = root
+        for _ in range(max_unwrap_depth):
+            subdirs = [c for c in node.iterdir() if c.is_dir()]
+            case_children = [c for c in subdirs if has_ct_series_subtree(c)]
 
-    node = root
-    for _ in range(max_unwrap_depth):
-        subdirs = [c for c in node.iterdir() if c.is_dir()]
-        case_children = [c for c in subdirs if has_ct_series_subtree(c)]
+            if len(case_children) >= 2:
+                dir_cases = sorted(case_children)
+                break
+            if len(case_children) == 1 and not _dir_has_direct_series(node):
+                node = case_children[0]
+                continue
+            if has_ct_series_subtree(node) or _dir_has_direct_series(node):
+                dir_cases = [node]
+            break
 
-        if len(case_children) >= 2:
-            return sorted(case_children)
-        if len(case_children) == 1 and not _dir_has_direct_series(node):
-            node = case_children[0]
-            continue
-        break
+    combined = {str(p.resolve()): p for p in dir_cases}
+    for zp in zip_cases:
+        combined[str(zp.resolve())] = zp
+    return sorted(combined.values(), key=lambda p: p.name.lower())
 
-    if has_ct_series_subtree(node) or _dir_has_direct_series(node):
-        return [node]
-    return []
+
+def is_zip_case(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() == ".zip"
+
+
+def discover_zip_cases(root: Path) -> List[Path]:
+    """Top-level ``.zip`` archives under a DICOM root (e.g. F:/На спине)."""
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    return sorted(p for p in root.iterdir() if p.is_file() and p.suffix.lower() == ".zip")
+
+
+def extract_zip_case(zip_path: Path, work_dir: Path, work_slug: str) -> Path:
+    """
+    Extract one patient zip into a Linux temp tree for dcm2niix / pydicom.
+
+    Unpacking to ``work_dir`` (not DrvFs) is faster than random reads inside zip on F:.
+    """
+    zip_path = Path(zip_path)
+    unpack_dir = work_dir / f"unpack_{work_slug}"
+    if unpack_dir.exists():
+        shutil.rmtree(unpack_dir, ignore_errors=True)
+    unpack_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(unpack_dir)
+    return unpack_dir
+
+
+def resolve_case_folder(
+    case_path: Path,
+    work_dir: Path,
+    work_slug: str,
+) -> Tuple[Path, Path, List[str]]:
+    """
+    Return ``(processing_folder, original_source, extra_warnings)``.
+
+    Directories pass through; ``.zip`` files are extracted under ``work_dir``.
+    """
+    case_path = Path(case_path)
+    if is_zip_case(case_path):
+        folder = extract_zip_case(case_path, work_dir, work_slug)
+        return folder, case_path, [f"source_zip={case_path.name}"]
+    if case_path.is_dir():
+        return case_path, case_path, []
+    raise ValueError(f"Case path is neither directory nor zip: {case_path}")
 
 
 def cleanup_case_temp(work_dir: Path, work_slug: str) -> None:
     """Remove all per-case scratch directories for a slug (tmpfs/disk hygiene)."""
-    for prefix in ("series_", "nifti_", "seg_"):
+    for prefix in ("series_", "nifti_", "seg_", "unpack_"):
         target = work_dir / f"{prefix}{work_slug}"
         if target.exists():
             shutil.rmtree(target, ignore_errors=True)
 
 
 def prepare_case(
-    case_folder: Path,
+    case_path: Path,
     work_dir: Path,
     *,
     case_id: Optional[str] = None,
@@ -570,10 +632,13 @@ def prepare_case(
     reuse_nifti: bool = False,
 ) -> PrepResult:
     """Select main CT series, stage if needed, convert to NIfTI."""
-    case_folder = Path(case_folder)
-    cid = case_id or case_folder.name
+    case_path = Path(case_path)
+    cid = case_id or (case_path.stem if is_zip_case(case_path) else case_path.name)
     slug = work_slug or make_ascii_work_slug(cid, index=case_index)
     warnings: List[str] = []
+
+    case_folder, source_path, zip_warnings = resolve_case_folder(case_path, work_dir, slug)
+    warnings.extend(zip_warnings)
 
     scan_root = find_dominant_dicom_subdir(case_folder) or case_folder
     if scan_root != case_folder:
@@ -631,7 +696,7 @@ def prepare_case(
     return PrepResult(
         case_id=cid,
         work_slug=slug,
-        source_folder=case_folder,
+        source_folder=source_path,
         series=series,
         series_input_dir=series_input_dir,
         nifti_file=nifti_file,
