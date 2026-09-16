@@ -30,21 +30,35 @@ ML-проект для прогнозирования смещения поче�
 
 ## Быстрый старт (локально)
 
+Канонический вход — **CT Workbench** на порту **8010** (`src.api.ct_workbench_api`). На машине разработки (WSL) используйте venv `/home/user/venv-ml-trainer`.
+
 ```bash
-cd /path/to/ml-trainer
-pip install -r requirements.txt
+cd /mnt/e/ml/ml-trainer   # или путь к клону
+source /home/user/venv-ml-trainer/bin/activate
+# иначе: python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+
+export PYTHONPATH="$PWD"
+# alias модели (research-only, не promoted winner):
+ls -lh models/adaptive_ensemble_clinical_honest.pkl
+# опционально: export MODEL_PATH="$PWD/models/adaptive_ensemble_clinical_honest.pkl"
+
 python -m uvicorn src.api.ct_workbench_api:app --host 0.0.0.0 --port 8010
 ```
+
+Перезапуск в WSL: `bash scripts/tools/restart_workbench_wsl.sh` (тот же venv, тот же uvicorn на `:8010`, лог `/tmp/ct_workbench_uvicorn.log`).
 
 Открыть: http://127.0.0.1:8010/
 
 ### Обучение honest-модели
 
+Ключевой скрипт: `scripts/data/train_clinical_honest.py`. Считает nested GroupKFold OOF; не смешивайте это с историческим не-nested GKF-OOF и не трактуйте in-sample MAE как production.
+
 ```bash
+source /home/user/venv-ml-trainer/bin/activate
 python scripts/data/train_clinical_honest.py --z-head ensemble
 ```
 
-Артефакт: `models/adaptive_ensemble_clinical_honest.pkl`.
+Полный цикл после свежих extract (WSL): `bash scripts/tools/wsl_retrain_clinical_honest.sh` (из Windows: `scripts/tools/launch_wsl_retrain.ps1`). Артефакт alias: `models/adaptive_ensemble_clinical_honest.pkl`.
 
 ## Развёртывание в Docker
 
@@ -155,7 +169,7 @@ docs/                       # отчёты и материалы
 Браузерный интерфейс для загрузки supine-МСКТ, QA признаков и ML-прогноза смещения почек.
 
 - Спецификация: [`frontend/docs/PRD.md`](frontend/docs/PRD.md)
-- Локально: `python -m uvicorn src.api.ct_workbench_api:app --port 8010`
+- Локально / WSL: venv `/home/user/venv-ml-trainer`, затем `python -m uvicorn src.api.ct_workbench_api:app --host 0.0.0.0 --port 8010` или `bash scripts/tools/restart_workbench_wsl.sh`
 - Docker: см. раздел выше
 
 ## Важные замечания
