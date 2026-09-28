@@ -90,6 +90,15 @@ from scripts.inference.enhanced_ct_extractor import (  # noqa: E402
     _normalize_name,
     extract_features_from_dicom_folder,
 )
+from src.features.ct_anatomy import (  # noqa: E402
+    attach_body_type,
+    extract_anatomy_from_seg_dir,
+    run_anatomy_segmentation,
+)
+from src.features.ct_anatomy.abdomen import assign_clinical_body_size  # noqa: E402
+from src.features.ct_anatomy.extract import body_mask_fields_from_seg_dir  # noqa: E402
+from src.features.ct_anatomy.segmentation import run_body_task  # noqa: E402
+from src.features.ct_anatomy.profiles import PROFILE_FAST, PROFILE_FULL  # noqa: E402
 
 
 def extract_dicom_metadata(dicom_file: Path) -> Dict[str, Any]:
@@ -277,6 +286,7 @@ def process_case(
     roi_subset: Optional[Sequence[str]] = None,
     case_id: Optional[str] = None,
     keep_temp: bool = False,
+    anatomy_profile: str = PROFILE_FAST,
 ) -> Dict[str, Any]:
     case_folder = Path(case_folder)
     case_id = case_id or (case_folder.stem if is_zip_case(case_folder) else case_folder.name)
@@ -299,6 +309,7 @@ def process_case(
             reuse_nifti=reuse_nifti,
             prep_only=prep_only,
             roi_subset=roi_subset,
+            anatomy_profile=anatomy_profile,
         )
     finally:
         if not keep_temp:
@@ -334,6 +345,7 @@ def _process_case_inner(
     reuse_nifti: bool,
     prep_only: bool,
     roi_subset: Optional[Sequence[str]],
+    anatomy_profile: str = PROFILE_FAST,
 ) -> Dict[str, Any]:
     prep = prepare_case(
         case_folder,
@@ -360,6 +372,9 @@ def _process_case_inner(
 
     if prep.series.files:
         row.update(extract_dicom_metadata(prep.series.files[0]))
+    row.update(attach_body_type(row))
+    profile = anatomy_profile if anatomy_profile in (PROFILE_FAST, PROFILE_FULL) else PROFILE_FAST
+    row["anatomy_profile"] = profile
 
     if prep_only:
         row["status"] = "prepared"
@@ -367,23 +382,62 @@ def _process_case_inner(
 
     kidney_feats: Dict[str, float] = {}
     ts_ok = False
+    seg_dir: Optional[Path] = None
     if use_totalsegmentator and prep.nifti_file:
         seg_dir = work_dir / f"seg_{prep.work_slug}"
-        if seg_dir.exists():
-            shutil.rmtree(seg_dir, ignore_errors=True)
-        seg_dir.mkdir(parents=True, exist_ok=True)
-        ts_ok = run_totalsegmentator(
-            prep.nifti_file,
-            seg_dir,
-            fast=fast,
-            device=device,
-            roi_subset=roi_subset,
-        )
-        if ts_ok:
-            kidney_feats = extract_kidney_features_from_ts_output(seg_dir)
-            row["totalsegmentator_status"] = "ok" if kidney_feats else "empty_masks"
+        if profile == PROFILE_FULL:
+            # Keep task folders when the caller asked to reuse the NIfTI work dir.
+            if not reuse_nifti and seg_dir.exists():
+                shutil.rmtree(seg_dir, ignore_errors=True)
+            seg_dir.mkdir(parents=True, exist_ok=True)
+            row.update(
+                run_anatomy_segmentation(
+                    prep.nifti_file,
+                    seg_dir,
+                    PROFILE_FULL,
+                    device=device,
+                    reuse=reuse_nifti,
+                )
+            )
+            total_dir = seg_dir / "total"
+            if _has_segmentation_output(total_dir):
+                kidney_feats = extract_kidney_features_from_ts_output(total_dir)
+                ts_ok = bool(kidney_feats)
+                row["totalsegmentator_status"] = "ok" if ts_ok else "empty_masks"
+            else:
+                row["totalsegmentator_status"] = "failed"
+            try:
+                row.update(extract_anatomy_from_seg_dir(seg_dir, prep.nifti_file))
+            except Exception as exc:
+                print(f"  anatomy measurement error: {exc}")
+                row["anatomy_error"] = str(exc)
         else:
-            row["totalsegmentator_status"] = "failed"
+            if seg_dir.exists():
+                shutil.rmtree(seg_dir, ignore_errors=True)
+            seg_dir.mkdir(parents=True, exist_ok=True)
+            ts_ok = run_totalsegmentator(
+                prep.nifti_file,
+                seg_dir,
+                fast=fast,
+                device=device,
+                roi_subset=roi_subset,
+            )
+            if ts_ok:
+                kidney_feats = extract_kidney_features_from_ts_output(seg_dir)
+                row["totalsegmentator_status"] = "ok" if kidney_feats else "empty_masks"
+            else:
+                row["totalsegmentator_status"] = "failed"
+        if profile != PROFILE_FULL:
+            # Skin envelope for body_width / body_depth. Kidney masks stay in seg_dir.
+            row.update(
+                run_body_task(
+                    prep.nifti_file,
+                    seg_dir,
+                    device=device,
+                    reuse=reuse_nifti,
+                    fast=True,
+                )
+            )
         gc.collect()
     elif use_totalsegmentator:
         row["totalsegmentator_status"] = "no_nifti"
@@ -423,6 +477,10 @@ def _process_case_inner(
 
     if canonical and not row.get("full_name_key"):
         row["full_name_key"] = _normalize_name(str(row.get("patient_name") or case_id))
+
+    if seg_dir is not None and prep.nifti_file is not None:
+        row.update(body_mask_fields_from_seg_dir(seg_dir, prep.nifti_file, row))
+    row.update(assign_clinical_body_size(row))
 
     return row
 
@@ -597,6 +655,7 @@ def run_job(
                 prep_only=prep_only,
                 roi_subset=args.roi_subset,
                 keep_temp=args.keep_temp,
+                anatomy_profile=args.anatomy_profile,
             )
             print(f"  -> {row.get('status')} ts={row.get('totalsegmentator_status')} slices={row.get('series_slices')}")
         except Exception as exc:
@@ -672,6 +731,12 @@ def main() -> int:
     parser.add_argument("--prep-only", action="store_true", help="Only series selection + dcm2niix")
     parser.add_argument("--nifti-only", action="store_true", help="Same as --prep-only")
     parser.add_argument("--fast", action="store_true", help="Fast TotalSegmentator mode")
+    parser.add_argument(
+        "--anatomy-profile",
+        default=PROFILE_FAST,
+        choices=[PROFILE_FAST, PROFILE_FULL],
+        help="fast: kidneys only (default). full: spine, abdomen, fat, psoas at 1.5 mm",
+    )
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "gpu"])
     parser.add_argument("--no-compression", action="store_true", help="Uncompressed .nii from dcm2niix")
     parser.add_argument("--reuse-nifti", action="store_true", help="Reuse NIfTI in temp dir")
@@ -718,6 +783,7 @@ def main() -> int:
     print(f"zip_only: {args.zip_only}  include_zip: {not args.no_zip}")
     print(f"dcm2niix: {find_dcm2niix_executable() or 'NOT FOUND'}")
     print(f"TotalSegmentator: {'off' if args.no_segmentation else 'on'}  canonical: {args.canonical}")
+    print(f"anatomy_profile: {args.anatomy_profile}")
     print(f"update_existing: {args.update_existing}  keep_temp: {args.keep_temp}")
     print(f"work_dir: {work_dir}")
 
