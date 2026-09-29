@@ -129,7 +129,12 @@ def extract_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         elif estimators_spec:
             names = [str(item[0]) for item in estimators_spec]
 
-        fitted = list(getattr(model, "estimators_", None) or [])
+        if names:
+            raw_fitted = getattr(model, "estimators_", None)
+            fitted = list(raw_fitted) if raw_fitted is not None else []
+        else:
+            # Single estimator (RF/GBT keep internal trees in ``estimators_``; not members).
+            fitted = [model]
         types = [type(est).__name__ for est in fitted]
         if names and len(names) == len(types):
             estimator_types[str(target)] = dict(zip(names, types))
