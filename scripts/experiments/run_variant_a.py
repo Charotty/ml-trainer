@@ -20,6 +20,12 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from src.data.holdout import (  # noqa: E402
     DEFAULT_HOLDOUT_PATH,
     assert_no_holdout_leak,
@@ -225,6 +231,37 @@ def fit_and_save_experiment_model(
     return out
 
 
+_FLAG_TO_KEY = {
+    "--estimator-profile": "estimator_profile",
+    "--model-kind": "model_kind",
+    "--enrichment-mode": "enrichment_mode",
+    "--yz-target-boost": "yz_target_boost",
+    "--no-yz-target-boost": "yz_target_boost",
+    "--yz-boost-mode": "yz_boost_mode",
+    "--loss-profile": "loss_profile",
+    "--add-missing-indicators": "add_missing_indicators",
+    "--no-add-missing-indicators": "add_missing_indicators",
+    "--drop-feature-groups": "drop_feature_groups",
+    "--drop-feature-prefixes": "drop_feature_prefixes",
+    "--keep-feature-names": "keep_feature_names",
+    "--ensemble-weight-mode": "ensemble_weight_mode",
+    "--estimator-overrides": "estimator_overrides",
+    "--z-postprocess": "z_postprocess",
+    "--inner-tree-search": "inner_tree_search",
+    "--inner-n-splits": "inner_n_splits",
+}
+
+
+def _explicit_keys(args: argparse.Namespace) -> set[str]:
+    argv = getattr(args, "_argv", None) or sys.argv[1:]
+    keys: set[str] = set()
+    for token in argv:
+        flag = token.split("=", 1)[0]
+        if flag in _FLAG_TO_KEY:
+            keys.add(_FLAG_TO_KEY[flag])
+    return keys
+
+
 def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
     run_id = args.run_id or f"{args.stage}_{args.tag}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     trainer_kwargs: dict[str, Any] = {
@@ -253,6 +290,22 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         trainer_kwargs["estimator_overrides"] = json.loads(args.estimator_overrides)
     if args.z_postprocess:
         trainer_kwargs["z_postprocess"] = args.z_postprocess
+    if args.inner_tree_search:
+        trainer_kwargs["inner_tree_search"] = True
+    if args.base_from_best:
+        best_cfg = _load_best_state().get("trainer_kwargs") or {}
+        merged = dict(best_cfg)
+        # Explicit CLI flags that differ from defaults override the best config.
+        for key, val in trainer_kwargs.items():
+            if key in _explicit_keys(args):
+                merged[key] = val
+        for key in ("na_trend_store",):
+            merged.pop(key, None)
+        trainer_kwargs = merged
+        if best_cfg.get("model_kind") and "model_kind" not in _explicit_keys(args):
+            args.model_kind = best_cfg["model_kind"]
+        trainer_kwargs["model_kind"] = args.model_kind
+        args.enrichment_mode = trainer_kwargs.get("enrichment_mode", args.enrichment_mode)
 
     df = build_training_frame(
         xlsx=args.xlsx,
@@ -270,23 +323,57 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         # Per-fold store is injected by nested_cv via trainer_factory(na_trend_store=...).
     factory = make_trainer_factory(args.model_kind, **factory_kwargs)
     seeds = tuple(int(s) for s in args.seeds.split(","))
-    t0 = time.time()
-    repeated = evaluate_repeated_nested_cv(
-        df,
-        trainer_factory=factory,
-        seeds=seeds,
-        n_splits=args.n_splits,
-        na_trend_store=na_store,
-        weight_mode=args.weight_mode,
-    )
-    cv_seconds = time.time() - t0
-    agg = repeated["aggregated"]
-    # Prefer seed-0 full result for left/right Z and CI.
-    seed0 = repeated["results"][0]
-    per_t = seed0.metrics.get("per_target_mae_mm") or {}
+    EXPERIMENTS_DIR.mkdir(parents=True, exist_ok=True)
+    cv_cache = EXPERIMENTS_DIR / f"{run_id}_cv.json"
+    if cv_cache.is_file():
+        cached = json.loads(cv_cache.read_text(encoding="utf-8"))
+        agg = cached["aggregated"]
+        per_seed = cached["per_seed"]
+        per_t = cached["per_target_seed0"]
+        ci = cached["ci95_seed0"]
+        clinical = cached["clinical_seed0"]
+        cv_seconds = float(cached.get("cv_seconds", 0.0))
+        print(f"[cv] loaded cached CV from {cv_cache}", flush=True)
+    else:
+        t0 = time.time()
+        repeated = evaluate_repeated_nested_cv(
+            df,
+            trainer_factory=factory,
+            seeds=seeds,
+            n_splits=args.n_splits,
+            na_trend_store=na_store,
+            weight_mode=args.weight_mode,
+        )
+        cv_seconds = time.time() - t0
+        agg = repeated["aggregated"]
+        per_seed = repeated["per_seed"]
+        # Seed-0 result provides left/right Z, CI and 3D metrics.
+        seed0 = repeated["results"][0]
+        per_t = seed0.metrics.get("per_target_mae_mm") or {}
+        ci = seed0.metrics.get("avg_mae_ci95") or [float("nan"), float("nan")]
+        clinical = {
+            k: v
+            for k, v in (seed0.metrics.get("clinical_3d") or {}).items()
+            if isinstance(v, (int, float, str, type(None)))
+        }
+        cv_cache.write_text(
+            json.dumps(
+                {
+                    "aggregated": agg,
+                    "per_seed": per_seed,
+                    "per_target_seed0": per_t,
+                    "ci95_seed0": list(ci),
+                    "clinical_seed0": clinical,
+                    "cv_seconds": cv_seconds,
+                    "trainer_kwargs": {k: v for k, v in trainer_kwargs.items() if k != "na_trend_store"},
+                },
+                indent=2,
+                ensure_ascii=False,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
     axis = agg.get("axis_mae_mm") or {}
-    ci = seed0.metrics.get("avg_mae_ci95") or [float("nan"), float("nan")]
-    clinical = seed0.metrics.get("clinical_3d") or {}
 
     model_path = None
     holdout_mae = float("nan")
@@ -310,80 +397,105 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
 
     avg_mae = float((agg.get("avg_mae_mm") or {}).get("mean", float("nan")))
     z_mae = float((agg.get("z_avg_mae_mm") or {}).get("mean", float("nan")))
-    best = _load_best_state()
-    verdict = _decision(avg_mae, z_mae, holdout_mae, best)
-    delta_avg = avg_mae - float(best["avg_mae_mm"]) if np.isfinite(best["avg_mae_mm"]) else float("nan")
-
-    if verdict == "принято":
-        _save_best_state(
-            {
-                "avg_mae_mm": avg_mae,
-                "z_avg_mae_mm": z_mae,
-                "holdout_trio_mae_mm": holdout_mae,
-                "run_id": run_id,
-                "model_path": str(model_path) if model_path else None,
-            }
-        )
-
     change = args.change or args.tag
-    journal = {
-        "stage": args.stage,
-        "change": change.replace("|", "/"),
-        "commit": _git_commit(),
-        "mae_avg": _fmt(avg_mae),
-        "ci95": f"[{_fmt(ci[0])}; {_fmt(ci[1])}]" if len(ci) == 2 else "—",
-        "mae_x": _fmt((axis.get("x") or {}).get("mean")),
-        "mae_y": _fmt((axis.get("y") or {}).get("mean")),
-        "mae_z": _fmt((axis.get("z") or {}).get("mean")),
-        "mae_zl": _fmt(per_t.get("kidney_left_delta_z")),
-        "mae_zr": _fmt(per_t.get("kidney_right_delta_z")),
-        "r2": _fmt((agg.get("avg_r2") or {}).get("mean"), 3),
-        "err_3d": _fmt(clinical.get("endpoint_error_mean_mae_mm")),
-        "within10": _fmt(
-            100.0 * float(clinical.get("within_10mm_ratio", float("nan"))), 1
-        )
-        + "%"
-        if np.isfinite(float(clinical.get("within_10mm_ratio", float("nan"))))
-        else "—",
-        "delta_best": _fmt(delta_avg),
-        "holdout": _fmt(holdout_mae),
-        "verdict": verdict,
+    within_ratio = float(clinical.get("within_10mm_ratio", float("nan")))
+    raw = {
+        "avg_mae": avg_mae,
+        "z_mae": z_mae,
+        "ci95": [float(ci[0]), float(ci[1])] if len(ci) == 2 else [float("nan"), float("nan")],
+        "mae_x": float((axis.get("x") or {}).get("mean", float("nan"))),
+        "mae_y": float((axis.get("y") or {}).get("mean", float("nan"))),
+        "mae_z": float((axis.get("z") or {}).get("mean", float("nan"))),
+        "mae_zl": float(per_t.get("kidney_left_delta_z", float("nan"))),
+        "mae_zr": float(per_t.get("kidney_right_delta_z", float("nan"))),
+        "r2": float((agg.get("avg_r2") or {}).get("mean", float("nan"))),
+        "err_3d": float(clinical.get("endpoint_error_mean_mae_mm", float("nan"))),
+        "within10": within_ratio,
+        "holdout": holdout_mae,
     }
-    if not args.no_journal:
-        append_journal_row(journal)
 
     payload = {
         "run_id": run_id,
         "stage": args.stage,
         "change": change,
-        "commit": journal["commit"],
+        "commit": _git_commit(),
         "trainer_kwargs": {k: v for k, v in trainer_kwargs.items() if k != "na_trend_store"},
+        "model_kind": args.model_kind,
         "weight_mode": args.weight_mode,
         "n_patients": len(df),
         "cv_seconds": cv_seconds,
         "repeated_cv": {
             "seeds": list(seeds),
             "aggregated": agg,
-            "per_seed": repeated["per_seed"],
+            "per_seed": per_seed,
         },
         "holdout_trio_mean_mae_mm": holdout_mae,
         "model_path": str(model_path) if model_path else None,
-        "verdict": verdict,
-        "journal": journal,
-        "vs_best": paired_compare_repeated(
-            repeated,
-            {
-                "aggregated": {
-                    "avg_mae_mm": {"mean": best.get("avg_mae_mm")},
-                    "z_avg_mae_mm": {"mean": best.get("z_avg_mae_mm")},
-                    "within_10mm_ratio": {"mean": float("nan")},
-                }
-            },
-        ),
+        "raw": raw,
+        "verdict": "pending",
     }
     out_json = EXPERIMENTS_DIR / f"{run_id}_metrics.json"
     out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
-    print(json.dumps({"run_id": run_id, "verdict": verdict, "avg_mae": avg_mae, "z_mae": z_mae, "holdout": holdout_mae}, ensure_ascii=False), flush=True)
+    if not args.defer_journal:
+        payload = finalize_run(out_json, write_journal=not args.no_journal)
+    print(json.dumps({"run_id": run_id, "verdict": payload.get("verdict"), "avg_mae": avg_mae, "z_mae": z_mae, "holdout": holdout_mae}, ensure_ascii=False), flush=True)
+    return payload
+
+
+def finalize_run(metrics_path: Path, *, write_journal: bool = True, note: str | None = None) -> dict[str, Any]:
+    """Decide verdict vs current best, update best_state, append the journal row."""
+    payload = json.loads(Path(metrics_path).read_text(encoding="utf-8"))
+    raw = payload["raw"]
+    best = _load_best_state()
+    avg_mae = float(raw["avg_mae"])
+    z_mae = float(raw["z_mae"])
+    holdout_mae = float(raw["holdout"]) if raw.get("holdout") is not None else float("nan")
+    verdict = _decision(avg_mae, z_mae, holdout_mae, best)
+    best_avg = float(best.get("avg_mae_mm", float("inf")))
+    delta_avg = avg_mae - best_avg if np.isfinite(best_avg) else float("nan")
+    if verdict == "принято":
+        _save_best_state(
+            {
+                "avg_mae_mm": avg_mae,
+                "z_avg_mae_mm": z_mae,
+                "holdout_trio_mae_mm": holdout_mae,
+                "run_id": payload["run_id"],
+                "model_path": payload.get("model_path"),
+                "trainer_kwargs": payload.get("trainer_kwargs"),
+                "model_kind": payload.get("model_kind"),
+            }
+        )
+    ci = raw.get("ci95") or [float("nan"), float("nan")]
+    within = float(raw.get("within10", float("nan")))
+    change = str(payload.get("change") or "")
+    if note:
+        change = f"{change} ({note})"
+    journal = {
+        "stage": str(payload["stage"]),
+        "change": change.replace("|", "/"),
+        "commit": payload.get("commit", "unknown"),
+        "mae_avg": _fmt(avg_mae),
+        "ci95": f"[{_fmt(ci[0])}; {_fmt(ci[1])}]",
+        "mae_x": _fmt(raw.get("mae_x")),
+        "mae_y": _fmt(raw.get("mae_y")),
+        "mae_z": _fmt(raw.get("mae_z")),
+        "mae_zl": _fmt(raw.get("mae_zl")),
+        "mae_zr": _fmt(raw.get("mae_zr")),
+        "r2": _fmt(raw.get("r2"), 3),
+        "err_3d": _fmt(raw.get("err_3d")),
+        "within10": (_fmt(100.0 * within, 1) + "%") if np.isfinite(within) else "—",
+        "delta_best": _fmt(delta_avg),
+        "holdout": _fmt(holdout_mae),
+        "verdict": verdict,
+    }
+    if write_journal:
+        append_journal_row(journal)
+    payload["verdict"] = verdict
+    payload["journal"] = journal
+    payload["best_before"] = best
+    Path(metrics_path).write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
+    )
     return payload
 
 
@@ -399,6 +511,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--skip-build", action="store_true")
     p.add_argument("--skip-fit", action="store_true", help="CV only, no holdout model")
     p.add_argument("--no-journal", action="store_true")
+    p.add_argument(
+        "--defer-journal",
+        action="store_true",
+        help="Write metrics JSON only; append journal later via append_journal.py (parallel runs)",
+    )
     p.add_argument("--model-kind", default="ensemble")
     p.add_argument("--estimator-profile", default="production", choices=("production", "tiny", "small_n"))
     p.add_argument("--enrichment-mode", default="none", choices=("none", "na_trends", "projection"))
@@ -412,6 +529,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ensemble-weight-mode", default=None)
     p.add_argument("--estimator-overrides", default=None, help="JSON dict of RF/GBT overrides")
     p.add_argument("--z-postprocess", default=None)
+    p.add_argument("--inner-tree-search", action="store_true")
+    p.add_argument(
+        "--base-from-best",
+        action="store_true",
+        help="Start from best_state.json trainer_kwargs; explicit flags override",
+    )
     p.add_argument("--weight-mode", default="inner_groupkfold", choices=("inner_groupkfold", "fixed_prior"))
     p.add_argument("--n-splits", type=int, default=5)
     p.add_argument("--inner-n-splits", type=int, default=None)

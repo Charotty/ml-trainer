@@ -213,7 +213,8 @@ class GroupMedianRegressor(BaseEstimator, RegressorMixin):
     def __init__(self, group_indices: tuple[int, ...] | list[int] | None = None):
         self.group_indices = tuple(group_indices or ())
 
-    def fit(self, X, y):
+    def fit(self, X, y, sample_weight=None):
+        del sample_weight
         X = np.asarray(X, dtype=float)
         y = np.asarray(y, dtype=float).reshape(-1)
         self.global_median_ = float(np.nanmedian(y)) if len(y) else 0.0
@@ -249,43 +250,77 @@ class GroupMedianRegressor(BaseEstimator, RegressorMixin):
 
 
 class ZPostprocessWrapper(BaseEstimator, RegressorMixin):
-    """Wrap a fitted regressor with Z-axis post-processing (stage 8)."""
+    """Wrap an already-fitted regressor with Z-axis post-processing (stage 8).
 
-    def __init__(self, estimator=None, mode: str = "median_shrink", k: float = 0.5):
+    Modes:
+      * ``median_shrink`` — pred = median + k·(raw − median); k chosen on inner
+        3-fold OOF predictions of a cloned estimator (grid 0..1), never on the
+        outer validation fold.
+      * ``clip_q05_q95`` — clip to 5–95% quantiles of training Z.
+      * ``sign_magnitude`` — keep the sign, shrink the magnitude toward the
+        training median |Z| with inner-OOF-chosen k.
+    """
+
+    K_GRID = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+    def __init__(self, estimator=None, mode: str = "median_shrink", k: float | None = None):
         self.estimator = estimator
         self.mode = mode
-        self.k = float(k)
+        self.k = k
 
-    def fit(self, X, y):
+    def _inner_oof(self, X, y) -> np.ndarray | None:
+        from sklearn.model_selection import KFold
+
+        X = np.asarray(X, dtype=float)
+        n = len(y)
+        if n < 9 or self.estimator is None:
+            return None
+        oof = np.full(n, np.nan)
+        for tr, va in KFold(n_splits=3, shuffle=True, random_state=42).split(X):
+            est = clone(self.estimator)
+            try:
+                est.fit(X[tr], y[tr])
+                oof[va] = np.asarray(est.predict(X[va]), dtype=float).reshape(-1)
+            except Exception:
+                return None
+        return oof
+
+    def _apply(self, pred: np.ndarray, k: float) -> np.ndarray:
+        mode = (self.mode or "").strip().lower()
+        if mode == "median_shrink":
+            return self.median_ + k * (pred - self.median_)
+        if mode == "sign_magnitude":
+            mag = np.abs(pred)
+            return np.sign(pred) * (self.abs_median_ + k * (mag - self.abs_median_))
+        if mode in {"clip_q05_q95", "clip"}:
+            return np.clip(pred, self.q05_, self.q95_)
+        return pred
+
+    def fit(self, X, y, sample_weight=None):
+        del sample_weight
         y = np.asarray(y, dtype=float).reshape(-1)
         finite = y[np.isfinite(y)]
         self.median_ = float(np.median(finite)) if finite.size else 0.0
+        self.abs_median_ = float(np.median(np.abs(finite))) if finite.size else 0.0
         self.q05_ = float(np.percentile(finite, 5)) if finite.size else -50.0
         self.q95_ = float(np.percentile(finite, 95)) if finite.size else 50.0
-        if self.estimator is not None and not hasattr(self.estimator, "predict"):
-            self.estimator.fit(X, y)
-        elif self.estimator is not None and not hasattr(self.estimator, "estimators_"):
-            # Already fitted voting ensembles expose estimators_; skip re-fit.
-            try:
-                self.estimator.predict(np.asarray(X)[:1])
-            except Exception:
-                self.estimator.fit(X, y)
+        mode = (self.mode or "").strip().lower()
+        self.k_ = 1.0 if self.k is None else float(self.k)
+        if self.k is None and mode in {"median_shrink", "sign_magnitude"}:
+            oof = self._inner_oof(X, y)
+            if oof is not None:
+                mask = np.isfinite(oof) & np.isfinite(y)
+                best_k, best_mae = 1.0, float("inf")
+                for k in self.K_GRID:
+                    mae = float(np.mean(np.abs(self._apply(oof[mask], k) - y[mask])))
+                    if mae < best_mae - 1e-9:
+                        best_k, best_mae = k, mae
+                self.k_ = best_k
         return self
 
     def predict(self, X):
         pred = np.asarray(self.estimator.predict(X), dtype=float).reshape(-1)
-        mode = (self.mode or "").strip().lower()
-        if mode == "median_shrink":
-            return self.median_ + self.k * (pred - self.median_)
-        if mode in {"clip_q05_q95", "clip"}:
-            return np.clip(pred, self.q05_, self.q95_)
-        if mode == "sign_magnitude":
-            # Soft sign shrink: preserve sign, shrink magnitude toward median abs.
-            mag = np.abs(pred)
-            med_mag = abs(self.median_) if abs(self.median_) > 1e-6 else float(np.median(np.abs(pred)))
-            shrunk = 0.5 * mag + 0.5 * med_mag
-            return np.sign(pred) * shrunk
-        return pred
+        return self._apply(pred, getattr(self, "k_", 1.0))
 
 
 def make_single_estimator(

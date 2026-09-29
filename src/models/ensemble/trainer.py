@@ -35,9 +35,17 @@ from src.models.ensemble.tuner import (
     average_groupkfold_weights,
     optimize_ensemble_weights as tune_ensemble_weights,
     sanitize_predictions,
+    select_tree_params_groupkfold,
+    stacking_weights_groupkfold,
 )
 
 PACKAGE_STATUS = "production"
+
+
+def _is_plugin_kind(kind: str) -> bool:
+    from src.models.ensemble import model_kinds as _mk
+
+    return kind not in MODEL_KIND_ALIASES.values() and _mk.is_registered(kind)
 
 
 class AdaptiveEnsembleTrainer(FeatureTransformer):
@@ -56,6 +64,7 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
         estimator_overrides: Mapping[str, Mapping[str, Any]] | dict | None = None,
         ensemble_weight_mode: str | None = None,
         z_postprocess: str | None = None,
+        inner_tree_search: bool = False,
         encode_categoricals: bool = True,
         add_missing_indicators: bool = True,
         drop_feature_groups: tuple[str, ...] | list[str] | None = None,
@@ -85,11 +94,13 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
             else (2 if estimator_profile in {"tiny", "small_n"} else 3)
         )
         kind_key = str(model_kind).strip().lower()
-        if kind_key not in MODEL_KIND_ALIASES:
+        from src.models.ensemble import model_kinds as _mk
+
+        if kind_key not in MODEL_KIND_ALIASES and not _mk.is_registered(kind_key):
             raise ValueError(
-                f"model_kind must be one of {sorted(set(MODEL_KIND_ALIASES.values()))}, got {model_kind!r}"
+                f"model_kind must be one of {sorted(set(MODEL_KIND_ALIASES.values()) | set(_mk.all_aliases().values()))}, got {model_kind!r}"
             )
-        self.model_kind = MODEL_KIND_ALIASES[kind_key]
+        self.model_kind = MODEL_KIND_ALIASES.get(kind_key) or _mk.resolve(kind_key)
         # yz_boost_mode overrides the boolean flag when set.
         mode = (yz_boost_mode or ("default" if yz_target_boost else "off")).strip().lower()
         if mode not in {"default", "off", "soft", "y_only"}:
@@ -100,6 +111,7 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
         self.estimator_overrides = dict(estimator_overrides or {})
         self.ensemble_weight_mode = (ensemble_weight_mode or "optimized").strip().lower()
         self.z_postprocess = z_postprocess
+        self.inner_tree_search = bool(inner_tree_search)
         self._inner_fold_weight_traces: dict = {}
         self._inner_weight_variance: dict = {}
         self._optimized_weights: dict = {}
@@ -640,12 +652,43 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                 continue
 
             base_models = self.load_base_models(target_name)
-            if self.model_kind in ("mean", "median", "group_median") or self.model_kind in SINGLE_KIND_TO_NAME:
-                est_name, single = make_single_estimator(
-                    self.model_kind,
+            if (
+                getattr(self, "inner_tree_search", False)
+                and self.model_kind in ("ensemble", "rf", "gbt")
+                and groups_t is not None
+                and len(np.unique(groups_t)) >= 2
+            ):
+                picked = select_tree_params_groupkfold(
                     base_models,
-                    feature_names=list(self.feature_names or []),
+                    X_train_t,
+                    y_train_full,
+                    groups_t,
+                    sample_weight=w_full,
+                    n_splits=self.inner_n_splits,
                 )
+                for member, params in picked.items():
+                    base_models[member].set_params(**params)
+                self._tree_search_choices = getattr(self, "_tree_search_choices", {})
+                self._tree_search_choices[target_name] = picked
+                print(f"  [tree-search] {target_name}: {picked}")
+            if self.model_kind in ("mean", "median", "group_median") or self.model_kind in SINGLE_KIND_TO_NAME or _is_plugin_kind(self.model_kind):
+                if _is_plugin_kind(self.model_kind):
+                    from src.models.ensemble import model_kinds as _mk
+
+                    est_name, single = _mk.build(
+                        self.model_kind,
+                        target_name,
+                        estimator_profile=self.estimator_profile,
+                        feature_names=list(self.feature_names or []),
+                        target_names=list(self.target_names),
+                        y_context=np.asarray(y_train, dtype=float)[tr_mask],
+                    )
+                else:
+                    est_name, single = make_single_estimator(
+                        self.model_kind,
+                        base_models,
+                        feature_names=list(self.feature_names or []),
+                    )
                 single.fit(
                     X_train_t,
                     y_train_full,
@@ -653,7 +696,7 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                 )
                 if getattr(self, "z_postprocess", None) and str(target_name).endswith("_z"):
                     wrapped = ZPostprocessWrapper(
-                        estimator=single, mode=str(self.z_postprocess), k=0.5
+                        estimator=single, mode=str(self.z_postprocess), k=None
                     )
                     wrapped.fit(X_train_t, y_train_full)
                     single = wrapped
@@ -686,10 +729,25 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                 print(f"  {est_name} - MAE: {mae:.3f} mm, R2: {r2:.3f}")
                 continue
 
-            if weight_mode == "fixed_prior":
+            ewm = getattr(self, "ensemble_weight_mode", "optimized") or "optimized"
+            equal_w = {n: 1.0 / len(base_models) for n in base_models.keys()}
+            n_groups_ewm = 0 if groups_t is None else len(np.unique(groups_t))
+            if ewm == "equal":
+                optimized_weights = dict(equal_w)
+            elif ewm == "fixed_prior" or weight_mode == "fixed_prior":
                 priors = self.adaptive_weights.get(target_name, {})
                 total = sum(priors.get(n, 1.0) for n in base_models.keys()) or len(base_models)
                 optimized_weights = {n: priors.get(n, 1.0) / total for n in base_models.keys()}
+            elif ewm == "stacking" and n_groups_ewm >= 2:
+                optimized_weights = stacking_weights_groupkfold(
+                    base_models,
+                    X_train_t,
+                    y_train_full,
+                    groups_t,
+                    sample_weight=w_full,
+                    n_splits=self.inner_n_splits,
+                )
+                print(f"  [stack] NNLS-ridge weights: {optimized_weights}")
             elif weight_mode == "inner_groupkfold":
                 n_groups_t = 0 if groups_t is None else len(np.unique(groups_t))
                 if n_groups_t < 2:
@@ -741,36 +799,18 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                     sample_weight=w_wt,
                 )
 
-            # Stage 6 ensemble blending modes (applied after base weight search).
-            ewm = getattr(self, "ensemble_weight_mode", "optimized") or "optimized"
-            if ewm == "equal" or weight_mode == "equal":
-                optimized_weights = {n: 1.0 / len(base_models) for n in base_models.keys()}
-            elif ewm == "fixed_prior":
-                priors = self.adaptive_weights.get(target_name, {})
-                total = sum(priors.get(n, 1.0) for n in base_models.keys()) or len(base_models)
-                optimized_weights = {n: priors.get(n, 1.0) / total for n in base_models.keys()}
-            elif ewm == "shrink":
-                equal = {n: 1.0 / len(base_models) for n in base_models.keys()}
+            # Stage 6 post-search blending modes.
+            if ewm == "shrink":
                 optimized_weights = {
-                    n: 0.5 * float(optimized_weights.get(n, 0.0)) + 0.5 * equal[n]
+                    n: 0.5 * float(optimized_weights.get(n, 0.0)) + 0.5 * equal_w[n]
                     for n in base_models.keys()
                 }
                 tot = sum(optimized_weights.values()) or 1.0
                 optimized_weights = {n: w / tot for n, w in optimized_weights.items()}
             elif ewm == "best_per_axis":
-                # Keep only the single largest weight (winner-take-all per target).
+                # Winner-take-all: the member with the largest inner-tuned weight.
                 best_name = max(optimized_weights, key=optimized_weights.get)
                 optimized_weights = {n: (1.0 if n == best_name else 0.0) for n in base_models.keys()}
-            elif ewm == "stacking":
-                # Non-negative ridge on member OOF preds is approximated by
-                # shrink+optimized blend; full stacking uses stacker in tuner when available.
-                equal = {n: 1.0 / len(base_models) for n in base_models.keys()}
-                optimized_weights = {
-                    n: 0.7 * float(optimized_weights.get(n, 0.0)) + 0.3 * equal[n]
-                    for n in base_models.keys()
-                }
-                tot = sum(optimized_weights.values()) or 1.0
-                optimized_weights = {n: w / tot for n, w in optimized_weights.items()}
             self._optimized_weights[target_name] = optimized_weights
             optimized_ensemble = self.create_optimized_voting_ensemble(
                 base_models, target_name, optimized_weights
@@ -785,7 +825,7 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                 fitted = ZPostprocessWrapper(
                     estimator=optimized_ensemble,
                     mode=str(self.z_postprocess),
-                    k=0.5,
+                    k=None,
                 )
                 fitted.fit(X_train_t, y_train_full)
             self.trained_models[target_name] = fitted

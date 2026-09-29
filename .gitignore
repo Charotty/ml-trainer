@@ -31,6 +31,10 @@ models/*.joblib
 # Immutable candidate binaries are local provenance (large). JSON cards in
 # models/archive/ are commit-friendly and must not be gitignored.
 models/archive/*.pkl
+# Variant A experiment artifacts (pkl too large; metrics JSON stays local)
+models/experiments/*.pkl
+tools/
+results/*.log
 
 # Data files
 data/raw/

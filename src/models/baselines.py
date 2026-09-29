@@ -49,9 +49,17 @@ KIND_ALIASES = {
 
 def normalize_model_kind(kind: str) -> str:
     key = str(kind).strip().lower()
-    if key not in KIND_ALIASES:
-        raise ValueError(f"Unknown model kind {kind!r}; expected one of {BASELINE_KINDS}")
-    return KIND_ALIASES[key]
+    if key in KIND_ALIASES:
+        return KIND_ALIASES[key]
+    from src.models.ensemble import model_kinds as _mk
+
+    resolved = _mk.resolve(key)
+    if resolved is not None:
+        return resolved
+    raise ValueError(
+        f"Unknown model kind {kind!r}; expected one of "
+        f"{BASELINE_KINDS + tuple(sorted(set(_mk.all_aliases().values())))}"
+    )
 
 
 def make_trainer_factory(

@@ -84,3 +84,106 @@ def test_small_n_profile_exists():
     gbt = models["GradientBoosting"]
     assert gbt.max_depth <= 3
     assert gbt.n_estimators <= 300
+
+
+@pytest.mark.parametrize(
+    "profile",
+    ["absolute_error", "quantile_0.5", "huber_0.5", "huber_0.7", "huber_0.9", "huber_all_axes"],
+)
+def test_loss_profiles_configure_members(profile):
+    models = make_base_models(
+        estimator_profile="tiny", target_name="kidney_left_delta_x", loss_profile=profile
+    )
+    gbt = models["GradientBoosting"]
+    if profile == "absolute_error":
+        assert gbt.loss == "absolute_error"
+        assert models["RandomForest"].criterion == "absolute_error"
+    elif profile == "quantile_0.5":
+        assert gbt.loss == "quantile" and gbt.alpha == 0.5
+    else:
+        assert gbt.loss == "huber"
+
+
+@pytest.mark.parametrize("mode", ["default", "off", "soft", "y_only"])
+def test_yz_boost_modes(mode):
+    trainer = AdaptiveEnsembleTrainer(enrichment_mode="none", estimator_profile="tiny", yz_boost_mode=mode)
+    y = np.array([0.0, 15.0, 30.0, 60.0])
+    wz = trainer._per_target_sample_weights("kidney_left_delta_z", y)
+    wy = trainer._per_target_sample_weights("kidney_left_delta_y", y)
+    if mode == "off":
+        assert wz is None and wy is None
+    elif mode == "soft":
+        assert wz.max() <= 2.0 + 1e-9
+    elif mode == "y_only":
+        assert np.allclose(wz, 1.0)
+        assert wy.max() > 1.0
+    else:
+        assert wz.max() == pytest.approx(3.5)
+
+
+@pytest.mark.parametrize("ewm", ["equal", "fixed_prior", "shrink", "stacking", "best_per_axis"])
+def test_ensemble_weight_modes_run(ewm):
+    df = _synthetic(n=10)
+    r = evaluate_nested_groupkfold_oof(
+        df,
+        trainer_factory=lambda **kw: _tiny_factory(ensemble_weight_mode=ewm, **kw),
+        n_splits=2,
+        group_seed=0,
+        targets=list(TARGET_NAMES[:2]),
+    )
+    for fold in r.folds:
+        for weights in fold["inner_ensemble_weights"].values():
+            assert sum(weights.values()) == pytest.approx(1.0)
+            if ewm == "best_per_axis":
+                assert sorted(weights.values())[-1] == pytest.approx(1.0)
+
+
+def test_z_postprocess_median_shrink_bounds():
+    from sklearn.linear_model import LinearRegression
+
+    from src.models.ensemble.estimators import ZPostprocessWrapper
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(40, 3))
+    y = rng.normal(size=40) * 5
+    base = LinearRegression().fit(X, y)
+    w = ZPostprocessWrapper(estimator=base, mode="median_shrink").fit(X, y)
+    assert w.k_ in ZPostprocessWrapper.K_GRID
+    clip = ZPostprocessWrapper(estimator=base, mode="clip_q05_q95").fit(X, y)
+    pred = clip.predict(X * 100)
+    assert pred.min() >= clip.q05_ - 1e-9 and pred.max() <= clip.q95_ + 1e-9
+
+
+def test_keep_feature_names_limits_matrix():
+    df = _synthetic(n=8)
+    keep = list(BASE_FEATURES[:4])
+    trainer = AdaptiveEnsembleTrainer(
+        enrichment_mode="none",
+        estimator_profile="tiny",
+        keep_feature_names=keep,
+    )
+    prepared = trainer.prepare_training_data_fit(df)
+    assert prepared[0] is not None
+    base_cols = [c for c in trainer.feature_names if not c.endswith("_was_missing")]
+    assert set(base_cols) <= set(keep) | {c for c in trainer.feature_names if c.startswith(("sex_", "body_type_"))}
+
+
+def test_plugin_registry_roundtrip():
+    from sklearn.linear_model import LinearRegression
+
+    from src.models.baselines import normalize_model_kind
+    from src.models.ensemble import model_kinds
+
+    @model_kinds.register("unit_test_linear", aliases=("utl",))
+    def _factory(target_name, **ctx):
+        return LinearRegression()
+
+    assert normalize_model_kind("utl") == "unit_test_linear"
+    df = _synthetic(n=8)
+    r = evaluate_nested_groupkfold_oof(
+        df,
+        trainer_factory=lambda **kw: _tiny_factory(model_kind="unit_test_linear", **kw),
+        n_splits=2,
+        targets=list(TARGET_NAMES[:2]),
+    )
+    assert np.isfinite(r.metrics["avg_mae_mm"])
