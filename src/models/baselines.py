@@ -20,10 +20,20 @@ from src.models.nested_cv import (
     evaluate_nested_groupkfold_oof,
 )
 
-BASELINE_KINDS: tuple[str, ...] = ("median", "mean", "ridge", "rf", "gbt", "ensemble")
+BASELINE_KINDS: tuple[str, ...] = (
+    "median",
+    "mean",
+    "group_median",
+    "ridge",
+    "rf",
+    "gbt",
+    "ensemble",
+)
 KIND_ALIASES = {
     "median": "median",
     "mean": "mean",
+    "group_median": "group_median",
+    "grouped_median": "group_median",
     "ridge": "ridge",
     "rf": "rf",
     "randomforest": "rf",

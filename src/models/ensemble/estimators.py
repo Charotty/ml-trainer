@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 import numpy as np
-from sklearn.base import clone
+from sklearn.base import BaseEstimator, RegressorMixin, clone
 from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, VotingRegressor
 from sklearn.linear_model import Lasso, Ridge
@@ -25,6 +25,7 @@ MODEL_KIND_ALIASES = {
     "ridge": "ridge",
     "mean": "mean",
     "median": "median",
+    "group_median": "group_median",
 }
 SINGLE_KIND_TO_NAME = {
     "rf": "RandomForest",
@@ -206,10 +207,100 @@ def make_base_models(
     }
 
 
-def make_single_estimator(kind: str, base_models: Mapping[str, Any]) -> tuple[str, Any]:
+class GroupMedianRegressor(BaseEstimator, RegressorMixin):
+    """Predict the training median within sex×body_type (or global fallback)."""
+
+    def __init__(self, group_indices: tuple[int, ...] | list[int] | None = None):
+        self.group_indices = tuple(group_indices or ())
+
+    def fit(self, X, y):
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y, dtype=float).reshape(-1)
+        self.global_median_ = float(np.nanmedian(y)) if len(y) else 0.0
+        buckets: dict[tuple, list[float]] = {}
+        if self.group_indices and X.size:
+            idxs = [i for i in self.group_indices if 0 <= int(i) < X.shape[1]]
+            for row, target in zip(X, y):
+                if not np.isfinite(target):
+                    continue
+                key = tuple(
+                    float(np.round(row[i], 6)) if np.isfinite(row[i]) else None for i in idxs
+                )
+                buckets.setdefault(key, []).append(float(target))
+        self.group_medians_ = {k: float(np.median(vals)) for k, vals in buckets.items()}
+        return self
+
+    def predict(self, X):
+        X = np.asarray(X, dtype=float)
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
+        out = np.full(len(X), getattr(self, "global_median_", 0.0), dtype=float)
+        medians = getattr(self, "group_medians_", {}) or {}
+        if not self.group_indices or not medians:
+            return out
+        idxs = [i for i in self.group_indices if 0 <= int(i) < X.shape[1]]
+        for i, row in enumerate(X):
+            key = tuple(
+                float(np.round(row[j], 6)) if np.isfinite(row[j]) else None for j in idxs
+            )
+            if key in medians:
+                out[i] = medians[key]
+        return out
+
+
+class ZPostprocessWrapper(BaseEstimator, RegressorMixin):
+    """Wrap a fitted regressor with Z-axis post-processing (stage 8)."""
+
+    def __init__(self, estimator=None, mode: str = "median_shrink", k: float = 0.5):
+        self.estimator = estimator
+        self.mode = mode
+        self.k = float(k)
+
+    def fit(self, X, y):
+        y = np.asarray(y, dtype=float).reshape(-1)
+        finite = y[np.isfinite(y)]
+        self.median_ = float(np.median(finite)) if finite.size else 0.0
+        self.q05_ = float(np.percentile(finite, 5)) if finite.size else -50.0
+        self.q95_ = float(np.percentile(finite, 95)) if finite.size else 50.0
+        if self.estimator is not None and not hasattr(self.estimator, "predict"):
+            self.estimator.fit(X, y)
+        elif self.estimator is not None and not hasattr(self.estimator, "estimators_"):
+            # Already fitted voting ensembles expose estimators_; skip re-fit.
+            try:
+                self.estimator.predict(np.asarray(X)[:1])
+            except Exception:
+                self.estimator.fit(X, y)
+        return self
+
+    def predict(self, X):
+        pred = np.asarray(self.estimator.predict(X), dtype=float).reshape(-1)
+        mode = (self.mode or "").strip().lower()
+        if mode == "median_shrink":
+            return self.median_ + self.k * (pred - self.median_)
+        if mode in {"clip_q05_q95", "clip"}:
+            return np.clip(pred, self.q05_, self.q95_)
+        if mode == "sign_magnitude":
+            # Soft sign shrink: preserve sign, shrink magnitude toward median abs.
+            mag = np.abs(pred)
+            med_mag = abs(self.median_) if abs(self.median_) > 1e-6 else float(np.median(np.abs(pred)))
+            shrunk = 0.5 * mag + 0.5 * med_mag
+            return np.sign(pred) * shrunk
+        return pred
+
+
+def make_single_estimator(
+    kind: str,
+    base_models: Mapping[str, Any],
+    *,
+    feature_names: list[str] | None = None,
+) -> tuple[str, Any]:
     """Return (estimator_name, unfitted estimator) for a non-ensemble kind."""
     if kind in ("mean", "median"):
         return kind, DummyRegressor(strategy=kind)
+    if kind == "group_median":
+        names = list(feature_names or [])
+        idxs = [names.index(col) for col in ("sex", "body_type") if col in names]
+        return "GroupMedian", GroupMedianRegressor(group_indices=tuple(idxs))
     name = SINGLE_KIND_TO_NAME[kind]
     return name, clone(base_models[name])
 

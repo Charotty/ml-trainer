@@ -44,6 +44,7 @@ class FeatureTransformer:
         add_missing_indicators: bool = True,
         drop_feature_groups: tuple[str, ...] | list[str] | None = None,
         drop_feature_prefixes: tuple[str, ...] | list[str] | None = None,
+        keep_feature_names: tuple[str, ...] | list[str] | None = None,
         verbose: bool = True,
     ):
         self.enrichment_mode = enrichment_mode
@@ -52,6 +53,7 @@ class FeatureTransformer:
         self.add_missing_indicators = bool(add_missing_indicators)
         self.drop_feature_groups = tuple(drop_feature_groups or ())
         self.drop_feature_prefixes = tuple(drop_feature_prefixes or ())
+        self.keep_feature_names = tuple(keep_feature_names or ())
         self.verbose = bool(verbose)
         self.categorical_encoder_: FoldCategoricalEncoder | None = None
         self.feature_names: list[str] = []
@@ -125,6 +127,14 @@ class FeatureTransformer:
             ]
         for prefix in self.drop_feature_prefixes:
             kept = [c for c in kept if not str(c).startswith(prefix)]
+        if self.keep_feature_names:
+            allow = set(self.keep_feature_names)
+            # Always keep missing-indicator companions of allowed columns when present.
+            kept = [
+                c
+                for c in kept
+                if c in allow or (c.endswith("_was_missing") and c[: -len("_was_missing")] in allow)
+            ]
         if not kept:
             raise ValueError(
                 "Feature ablation dropped every column; keep at least one group."

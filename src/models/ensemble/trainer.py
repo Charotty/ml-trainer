@@ -27,6 +27,7 @@ from src.models.ensemble.estimators import (
     fit_voting_ensemble,
     make_base_models,
     make_single_estimator,
+    ZPostprocessWrapper,
 )
 from src.models.ensemble.features import FeatureTransformer
 from src.models.ensemble.serializer import save_trainer
@@ -59,6 +60,7 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
         add_missing_indicators: bool = True,
         drop_feature_groups: tuple[str, ...] | list[str] | None = None,
         drop_feature_prefixes: tuple[str, ...] | list[str] | None = None,
+        keep_feature_names: tuple[str, ...] | list[str] | None = None,
     ):
         super().__init__(
             enrichment_mode=enrichment_mode,
@@ -67,6 +69,7 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
             add_missing_indicators=add_missing_indicators,
             drop_feature_groups=drop_feature_groups,
             drop_feature_prefixes=drop_feature_prefixes,
+            keep_feature_names=keep_feature_names,
             verbose=True,
         )
         self.z_head = z_head
@@ -637,13 +640,23 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                 continue
 
             base_models = self.load_base_models(target_name)
-            if self.model_kind in ("mean", "median") or self.model_kind in SINGLE_KIND_TO_NAME:
-                est_name, single = make_single_estimator(self.model_kind, base_models)
+            if self.model_kind in ("mean", "median", "group_median") or self.model_kind in SINGLE_KIND_TO_NAME:
+                est_name, single = make_single_estimator(
+                    self.model_kind,
+                    base_models,
+                    feature_names=list(self.feature_names or []),
+                )
                 single.fit(
                     X_train_t,
                     y_train_full,
                     **self._fit_kwargs_for_model(est_name, w_full),
                 )
+                if getattr(self, "z_postprocess", None) and str(target_name).endswith("_z"):
+                    wrapped = ZPostprocessWrapper(
+                        estimator=single, mode=str(self.z_postprocess), k=0.5
+                    )
+                    wrapped.fit(X_train_t, y_train_full)
+                    single = wrapped
                 self.trained_models[target_name] = single
                 self._optimized_weights[target_name] = {est_name: 1.0}
                 self._inner_fold_weight_traces[target_name] = [{est_name: 1.0}]
@@ -767,7 +780,15 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
             self._fit_voting_ensemble(optimized_ensemble, X_train_t, y_train_full, w_full)
             self._fit_voting_ensemble(adaptive_ensemble, X_train_t, y_train_full, w_full)
             self._fit_voting_ensemble(standard_ensemble, X_train_t, y_train_full, w_full)
-            self.trained_models[target_name] = optimized_ensemble
+            fitted = optimized_ensemble
+            if getattr(self, "z_postprocess", None) and str(target_name).endswith("_z"):
+                fitted = ZPostprocessWrapper(
+                    estimator=optimized_ensemble,
+                    mode=str(self.z_postprocess),
+                    k=0.5,
+                )
+                fitted.fit(X_train_t, y_train_full)
+            self.trained_models[target_name] = fitted
 
             best_single_mae = float("inf")
             if compute_base_cv:

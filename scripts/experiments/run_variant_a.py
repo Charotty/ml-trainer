@@ -245,6 +245,8 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         trainer_kwargs["drop_feature_groups"] = tuple(args.drop_feature_groups)
     if args.drop_feature_prefixes:
         trainer_kwargs["drop_feature_prefixes"] = tuple(args.drop_feature_prefixes)
+    if args.keep_feature_names:
+        trainer_kwargs["keep_feature_names"] = tuple(args.keep_feature_names)
     if args.ensemble_weight_mode:
         trainer_kwargs["ensemble_weight_mode"] = args.ensemble_weight_mode
     if args.estimator_overrides:
@@ -260,9 +262,13 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
     )
     print(f"[data] n={len(df)} run_id={run_id}", flush=True)
 
-    factory = make_trainer_factory(args.model_kind, **{
-        k: v for k, v in trainer_kwargs.items() if k != "model_kind"
-    })
+    na_store = None
+    factory_kwargs = {k: v for k, v in trainer_kwargs.items() if k != "model_kind"}
+    if args.enrichment_mode == "na_trends":
+        na_store = NaTrendStore.fit()
+        factory_kwargs["enrichment_mode"] = "na_trends"
+        # Per-fold store is injected by nested_cv via trainer_factory(na_trend_store=...).
+    factory = make_trainer_factory(args.model_kind, **factory_kwargs)
     seeds = tuple(int(s) for s in args.seeds.split(","))
     t0 = time.time()
     repeated = evaluate_repeated_nested_cv(
@@ -270,6 +276,7 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         trainer_factory=factory,
         seeds=seeds,
         n_splits=args.n_splits,
+        na_trend_store=na_store,
         weight_mode=args.weight_mode,
     )
     cv_seconds = time.time() - t0
@@ -401,6 +408,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--add-missing-indicators", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--drop-feature-groups", nargs="*", default=None)
     p.add_argument("--drop-feature-prefixes", nargs="*", default=None)
+    p.add_argument("--keep-feature-names", nargs="*", default=None)
     p.add_argument("--ensemble-weight-mode", default=None)
     p.add_argument("--estimator-overrides", default=None, help="JSON dict of RF/GBT overrides")
     p.add_argument("--z-postprocess", default=None)
