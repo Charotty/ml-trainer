@@ -187,3 +187,33 @@ def test_plugin_registry_roundtrip():
         targets=list(TARGET_NAMES[:2]),
     )
     assert np.isfinite(r.metrics["avg_mae_mm"])
+
+
+def test_per_axis_feature_indices():
+    from src.models.ensemble.estimators import per_axis_feature_indices
+
+    names = ["kidney_left_center_x_rel", "spine_center_y", "body_com_z", "bmi", "x_ratio_y"]
+    kept = per_axis_feature_indices(names, "kidney_left_delta_z")
+    assert [names[j] for j in kept] == ["body_com_z", "bmi"]
+    assert per_axis_feature_indices(names, "unknown_target") is None
+
+
+def test_per_axis_features_nested_cv():
+    df = _synthetic(n=8)
+    r = evaluate_nested_groupkfold_oof(
+        df,
+        trainer_factory=lambda **kw: _tiny_factory(per_axis_features=True, **kw),
+        n_splits=2,
+        targets=["kidney_left_delta_x", "kidney_right_delta_z"],
+    )
+    assert np.isfinite(r.metrics["avg_mae_mm"])
+
+
+def test_repeated_cv_reports_3d_error():
+    df = _synthetic(n=8)
+    out = evaluate_repeated_nested_cv(
+        df, trainer_factory=_tiny_factory, seeds=(0,), n_splits=2
+    )
+    agg = out["aggregated"]
+    assert np.isfinite(agg["mean_3d_error_mm"]["mean"])
+    assert np.isfinite(agg["within_10mm_ratio"]["mean"])

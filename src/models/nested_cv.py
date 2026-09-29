@@ -305,6 +305,16 @@ class NestedOOFResult:
         return payload
 
 
+def clinical_3d_value(clinical_3d: dict[str, Any] | None, key: str) -> float:
+    """Read a 3D endpoint metric from ``clinical_3d`` (patient-mean block preferred)."""
+    c = clinical_3d or {}
+    block = c.get("mean") if isinstance(c.get("mean"), dict) else c
+    try:
+        return float(block.get(key, float("nan")))
+    except (TypeError, ValueError):
+        return float("nan")
+
+
 def evaluate_nested_groupkfold_oof(
     df: pd.DataFrame,
     *,
@@ -487,20 +497,10 @@ def evaluate_repeated_nested_cv(
             for axis in ("x", "y", "z")
         },
         "within_10mm_ratio": _mean_std(
-            [
-                float(
-                    ((r.get("clinical_3d") or {}).get("within_10mm_ratio", float("nan")))
-                )
-                for r in per_seed
-            ]
+            [clinical_3d_value(r.get("clinical_3d"), "within_10mm_ratio") for r in per_seed]
         ),
         "mean_3d_error_mm": _mean_std(
-            [
-                float(
-                    ((r.get("clinical_3d") or {}).get("endpoint_error_mean_mae_mm", float("nan")))
-                )
-                for r in per_seed
-            ]
+            [clinical_3d_value(r.get("clinical_3d"), "mean_mm") for r in per_seed]
         ),
     }
     return {

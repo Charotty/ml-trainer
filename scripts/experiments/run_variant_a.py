@@ -248,6 +248,7 @@ _FLAG_TO_KEY = {
     "--estimator-overrides": "estimator_overrides",
     "--z-postprocess": "z_postprocess",
     "--inner-tree-search": "inner_tree_search",
+    "--per-axis-features": "per_axis_features",
     "--inner-n-splits": "inner_n_splits",
 }
 
@@ -292,6 +293,8 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         trainer_kwargs["z_postprocess"] = args.z_postprocess
     if args.inner_tree_search:
         trainer_kwargs["inner_tree_search"] = True
+    if args.per_axis_features:
+        trainer_kwargs["per_axis_features"] = True
     if args.base_from_best:
         best_cfg = _load_best_state().get("trainer_kwargs") or {}
         merged = dict(best_cfg)
@@ -398,7 +401,7 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
     avg_mae = float((agg.get("avg_mae_mm") or {}).get("mean", float("nan")))
     z_mae = float((agg.get("z_avg_mae_mm") or {}).get("mean", float("nan")))
     change = args.change or args.tag
-    within_ratio = float(clinical.get("within_10mm_ratio", float("nan")))
+    within_ratio = float((agg.get("within_10mm_ratio") or {}).get("mean", float("nan")))
     raw = {
         "avg_mae": avg_mae,
         "z_mae": z_mae,
@@ -409,7 +412,7 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         "mae_zl": float(per_t.get("kidney_left_delta_z", float("nan"))),
         "mae_zr": float(per_t.get("kidney_right_delta_z", float("nan"))),
         "r2": float((agg.get("avg_r2") or {}).get("mean", float("nan"))),
-        "err_3d": float(clinical.get("endpoint_error_mean_mae_mm", float("nan"))),
+        "err_3d": float((agg.get("mean_3d_error_mm") or {}).get("mean", float("nan"))),
         "within10": within_ratio,
         "holdout": holdout_mae,
     }
@@ -442,10 +445,26 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
+def _backfill_3d(payload: dict[str, Any]) -> None:
+    """Fill 3D error / within-10mm from per-seed clinical_3d (patient-mean block)."""
+    from src.models.nested_cv import clinical_3d_value
+
+    raw = payload["raw"]
+    per_seed = (payload.get("repeated_cv") or {}).get("per_seed") or []
+    for raw_key, c_key in (("err_3d", "mean_mm"), ("within10", "within_10mm_ratio")):
+        cur = raw.get(raw_key)
+        if cur is not None and np.isfinite(float(cur)):
+            continue
+        vals = [clinical_3d_value(r.get("clinical_3d"), c_key) for r in per_seed]
+        vals = [v for v in vals if np.isfinite(v)]
+        raw[raw_key] = float(np.mean(vals)) if vals else float("nan")
+
+
 def finalize_run(metrics_path: Path, *, write_journal: bool = True, note: str | None = None) -> dict[str, Any]:
     """Decide verdict vs current best, update best_state, append the journal row."""
     payload = json.loads(Path(metrics_path).read_text(encoding="utf-8"))
     raw = payload["raw"]
+    _backfill_3d(payload)
     best = _load_best_state()
     avg_mae = float(raw["avg_mae"])
     z_mae = float(raw["z_mae"])
@@ -530,6 +549,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--estimator-overrides", default=None, help="JSON dict of RF/GBT overrides")
     p.add_argument("--z-postprocess", default=None)
     p.add_argument("--inner-tree-search", action="store_true")
+    p.add_argument(
+        "--per-axis-features",
+        action="store_true",
+        help="Per target, drop coordinate features bound to other axes",
+    )
     p.add_argument(
         "--base-from-best",
         action="store_true",

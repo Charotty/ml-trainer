@@ -19,7 +19,9 @@ from src.models.ensemble.estimators import (
     DEFAULT_BEST_MODELS,
     MODEL_KIND_ALIASES,
     SINGLE_KIND_TO_NAME,
+    ColumnSubsetRegressor,
     copy_estimator,
+    per_axis_feature_indices,
     create_adaptive_voting_ensemble,
     create_optimized_voting_ensemble,
     create_standard_voting_ensemble,
@@ -70,6 +72,7 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
         drop_feature_groups: tuple[str, ...] | list[str] | None = None,
         drop_feature_prefixes: tuple[str, ...] | list[str] | None = None,
         keep_feature_names: tuple[str, ...] | list[str] | None = None,
+        per_axis_features: bool = False,
     ):
         super().__init__(
             enrichment_mode=enrichment_mode,
@@ -112,6 +115,7 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
         self.ensemble_weight_mode = (ensemble_weight_mode or "optimized").strip().lower()
         self.z_postprocess = z_postprocess
         self.inner_tree_search = bool(inner_tree_search)
+        self.per_axis_features = bool(per_axis_features)
         self._inner_fold_weight_traces: dict = {}
         self._inner_weight_variance: dict = {}
         self._optimized_weights: dict = {}
@@ -671,6 +675,16 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                 self._tree_search_choices = getattr(self, "_tree_search_choices", {})
                 self._tree_search_choices[target_name] = picked
                 print(f"  [tree-search] {target_name}: {picked}")
+            if getattr(self, "per_axis_features", False):
+                cols = per_axis_feature_indices(list(self.feature_names or []), target_name)
+                if cols is not None:
+                    base_models = {
+                        name: ColumnSubsetRegressor(estimator=est, columns=tuple(cols))
+                        for name, est in base_models.items()
+                    }
+                    print(
+                        f"  [per-axis] {target_name}: {len(cols)}/{len(self.feature_names or [])} features"
+                    )
             if self.model_kind in ("mean", "median", "group_median") or self.model_kind in SINGLE_KIND_TO_NAME or _is_plugin_kind(self.model_kind):
                 if _is_plugin_kind(self.model_kind):
                     from src.models.ensemble import model_kinds as _mk

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 import numpy as np
@@ -247,6 +248,49 @@ class GroupMedianRegressor(BaseEstimator, RegressorMixin):
             if key in medians:
                 out[i] = medians[key]
         return out
+
+
+_AXIS_TOKEN = re.compile(r"(?:^|_)([xyz])(?:_|$)")
+
+
+def per_axis_feature_indices(feature_names: list[str], target_name: str) -> list[int] | None:
+    """Columns allowed for ``target_name``: drop coordinate features of the other axes.
+
+    A feature is axis-bound when its name has a standalone ``x``/``y``/``z`` token
+    (``kidney_left_center_x_rel``, ``spine_center_z``, ``body_com_y`` ...).
+    Axis-free features (anthropometry, volumes, distances, trends) are kept.
+    """
+    axis = str(target_name).rsplit("_", 1)[-1]
+    if axis not in {"x", "y", "z"} or not feature_names:
+        return None
+    keep = []
+    for j, name in enumerate(feature_names):
+        tokens = set(_AXIS_TOKEN.findall(str(name)))
+        if tokens and axis not in tokens:
+            continue
+        keep.append(j)
+    if not keep or len(keep) == len(feature_names):
+        return None
+    return keep
+
+
+class ColumnSubsetRegressor(RegressorMixin, BaseEstimator):
+    """Fit/predict ``estimator`` on a fixed column subset of X (sample_weight forwarded)."""
+
+    def __init__(self, estimator=None, columns: tuple[int, ...] = ()):
+        self.estimator = estimator
+        self.columns = columns
+
+    def fit(self, X, y, sample_weight=None, **fit_params):
+        cols = list(self.columns)
+        self.estimator_ = clone(self.estimator)
+        if sample_weight is not None:
+            fit_params["sample_weight"] = sample_weight
+        self.estimator_.fit(np.asarray(X)[:, cols], y, **fit_params)
+        return self
+
+    def predict(self, X):
+        return self.estimator_.predict(np.asarray(X)[:, list(self.columns)])
 
 
 class ZPostprocessWrapper(BaseEstimator, RegressorMixin):
