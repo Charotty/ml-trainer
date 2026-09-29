@@ -460,8 +460,23 @@ def _backfill_3d(payload: dict[str, Any]) -> None:
         raw[raw_key] = float(np.mean(vals)) if vals else float("nan")
 
 
-def finalize_run(metrics_path: Path, *, write_journal: bool = True, note: str | None = None) -> dict[str, Any]:
-    """Decide verdict vs current best, update best_state, append the journal row."""
+MEDIAN_LIKE_KINDS = {"median", "mean", "group_median"}
+
+
+def finalize_run(
+    metrics_path: Path,
+    *,
+    write_journal: bool = True,
+    note: str | None = None,
+    reference: bool = False,
+) -> dict[str, Any]:
+    """Decide verdict vs current best, update best_state, append the journal row.
+
+    ``reference=True`` (stage 1 baselines): the row is a floor ("эталон"), it never
+    replaces the tuned config. If a median-like baseline beats the current best,
+    it becomes the comparator (plan: "если ансамбль не лучше медианы, все следующие
+    этапы сравниваются с медианой"), while ``trainer_kwargs`` stay unchanged.
+    """
     payload = json.loads(Path(metrics_path).read_text(encoding="utf-8"))
     raw = payload["raw"]
     _backfill_3d(payload)
@@ -469,9 +484,25 @@ def finalize_run(metrics_path: Path, *, write_journal: bool = True, note: str | 
     avg_mae = float(raw["avg_mae"])
     z_mae = float(raw["z_mae"])
     holdout_mae = float(raw["holdout"]) if raw.get("holdout") is not None else float("nan")
-    verdict = _decision(avg_mae, z_mae, holdout_mae, best)
     best_avg = float(best.get("avg_mae_mm", float("inf")))
     delta_avg = avg_mae - best_avg if np.isfinite(best_avg) else float("nan")
+    if reference:
+        verdict = "эталон"
+        kind = str(payload.get("model_kind") or "")
+        best_z = float(best.get("z_avg_mae_mm", float("inf")))
+        if kind in MEDIAN_LIKE_KINDS and (avg_mae < best_avg or z_mae < best_z):
+            new_state = dict(best)
+            new_state["avg_mae_mm"] = min(avg_mae, best_avg)
+            new_state["z_avg_mae_mm"] = min(z_mae, best_z)
+            if np.isfinite(holdout_mae):
+                new_state["holdout_trio_mae_mm"] = min(
+                    holdout_mae, float(best.get("holdout_trio_mae_mm", float("inf")))
+                )
+            new_state["comparator_run_id"] = payload["run_id"]
+            _save_best_state(new_state)
+            verdict = "эталон; стал планкой сравнения"
+    else:
+        verdict = _decision(avg_mae, z_mae, holdout_mae, best)
     if verdict == "принято":
         _save_best_state(
             {

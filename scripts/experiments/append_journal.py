@@ -27,12 +27,18 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("run_ids", nargs="*")
     p.add_argument("--skip", nargs=3, action="append", metavar=("STAGE", "CHANGE", "REASON"))
+    p.add_argument(
+        "--reference",
+        action="store_true",
+        help="Stage-1 baselines: journal as floor rows, never replace the tuned config",
+    )
+    p.add_argument("--note", default=None, help="Suffix appended to the change text")
     args = p.parse_args()
     for run_id in args.run_ids:
         path = EXPERIMENTS_DIR / f"{run_id}_metrics.json"
         if not path.is_file():
             raise FileNotFoundError(path)
-        out = finalize_run(path)
+        out = finalize_run(path, reference=args.reference, note=args.note)
         print(run_id, out["verdict"], flush=True)
     for stage, change, reason in args.skip or []:
         append_journal_row(
