@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -35,6 +35,7 @@ PROTOCOL_FIXED_PRIOR = "fixed_prior_benchmark"
 PROTOCOL_NESTED_PROXY = "nested_proxy_vs_honest"
 WEIGHT_INNER = "inner_groupkfold"
 WEIGHT_FIXED_PRIOR = "fixed_prior"
+DEFAULT_REPEAT_SEEDS = (0, 1, 2)
 
 
 def patient_group_column(df: pd.DataFrame) -> str:
@@ -47,6 +48,23 @@ def patient_group_column(df: pd.DataFrame) -> str:
 
 def patient_groups(df: pd.DataFrame) -> np.ndarray:
     return df[patient_group_column(df)].astype(str).values
+
+
+def remap_groups_for_seed(groups: np.ndarray, seed: int | None) -> np.ndarray:
+    """Prefix group labels with a seeded permutation so GroupKFold splits differ.
+
+    sklearn ``GroupKFold`` sorts unique group labels; remapping with a random
+    zero-padded prefix changes fold membership across seeds while keeping
+    patients atomically in one fold.
+    """
+    groups = np.asarray(groups, dtype=str)
+    if seed is None:
+        return groups
+    rng = np.random.default_rng(int(seed))
+    unique = np.unique(groups)
+    order = rng.permutation(len(unique))
+    mapping = {g: f"{order[i]:08d}__{g}" for i, g in enumerate(unique)}
+    return np.array([mapping[g] for g in groups], dtype=str)
 
 
 def _bootstrap_ci(per_patient_avg: np.ndarray, n_boot: int = N_BOOTSTRAP) -> tuple[float, float]:
@@ -296,16 +314,22 @@ def evaluate_nested_groupkfold_oof(
     na_trend_store_factory: NaTrendFactory | None = None,
     weight_mode: str = WEIGHT_INNER,
     targets: list[str] | None = None,
+    group_seed: int | None = None,
 ) -> NestedOOFResult:
-    """Evidentiary nested OOF. ``weight_mode='fixed_prior'`` is a benchmark only."""
+    """Evidentiary nested OOF. ``weight_mode='fixed_prior'`` is a benchmark only.
+
+    ``group_seed`` remaps patient groups so repeated GroupKFold runs (seeds
+    0/1/2) produce different outer folds for paired comparisons.
+    """
     if weight_mode not in {WEIGHT_INNER, WEIGHT_FIXED_PRIOR}:
         raise ValueError(f"Unknown weight_mode={weight_mode!r}")
     protocol = PROTOCOL_NESTED if weight_mode == WEIGHT_INNER else PROTOCOL_FIXED_PRIOR
     target_cols = list(targets or TARGET_NAMES)
     frame = df.reset_index(drop=True)
     name_col = patient_group_column(frame)
-    groups = frame[name_col].astype(str).values
-    n_unique = len(np.unique(groups))
+    groups_raw = frame[name_col].astype(str).values
+    groups = remap_groups_for_seed(groups_raw, group_seed)
+    n_unique = len(np.unique(groups_raw))
     splits = min(int(n_splits), n_unique)
     if splits < 2:
         raise ValueError(f"Need at least 2 groups for nested GroupKFold, got {n_unique}")
@@ -344,6 +368,7 @@ def evaluate_nested_groupkfold_oof(
                 "n_train": int(len(tr)),
                 "n_val": int(len(te)),
                 "val_groups": sorted(set(te[name_col].astype(str))),
+                "group_seed": group_seed,
                 "preprocessor": _preprocessor_snapshot(fold_trainer),
                 "weight_mode": weight_mode,
                 "inner_ensemble_weights": dict(getattr(fold_trainer, "_optimized_weights", {}) or {}),
@@ -364,6 +389,7 @@ def evaluate_nested_groupkfold_oof(
     metrics["weight_mode"] = weight_mode
     metrics["n_splits"] = splits
     metrics["n_patients"] = int(len(frame))
+    metrics["group_seed"] = group_seed
     clinical = compute_clinical_report(
         frame[target_cols],
         pred_df,
@@ -373,7 +399,7 @@ def evaluate_nested_groupkfold_oof(
     fold_masks = []
     for fold in folds:
         val = set(str(g) for g in fold.get("val_groups") or [])
-        fold_masks.append(np.array([str(g) in val for g in groups], dtype=bool))
+        fold_masks.append(np.array([str(g) in val for g in groups_raw], dtype=bool))
     conformal = fit_conformal_from_oof(
         frame[target_cols],
         pred_df,
@@ -394,12 +420,119 @@ def evaluate_nested_groupkfold_oof(
         metrics=metrics,
         oof_predictions=pred_df,
         folds=folds,
-        group_ids=[str(g) for g in groups],
+        group_ids=[str(g) for g in groups_raw],
         conformal=conformal,
         clinical_metrics=clinical,
         subgroup_metrics=clinical.get("subgroup_metrics"),
         worst_cases=list(clinical.get("worst_cases") or []),
     )
+
+
+def evaluate_repeated_nested_cv(
+    df: pd.DataFrame,
+    *,
+    trainer_factory: TrainerFactory,
+    seeds: Sequence[int] = DEFAULT_REPEAT_SEEDS,
+    n_splits: int = 5,
+    na_trend_store: NaTrendStore | None = None,
+    na_trend_store_factory: NaTrendFactory | None = None,
+    weight_mode: str = WEIGHT_INNER,
+    targets: list[str] | None = None,
+) -> dict[str, Any]:
+    """Run nested GroupKFold for each seed and aggregate mean/std metrics."""
+    seed_list = [int(s) for s in seeds]
+    per_seed: list[dict[str, Any]] = []
+    results: list[NestedOOFResult] = []
+    for seed in seed_list:
+        result = evaluate_nested_groupkfold_oof(
+            df,
+            trainer_factory=trainer_factory,
+            n_splits=n_splits,
+            na_trend_store=na_trend_store,
+            na_trend_store_factory=na_trend_store_factory,
+            weight_mode=weight_mode,
+            targets=targets,
+            group_seed=seed,
+        )
+        results.append(result)
+        per_seed.append(
+            {
+                "group_seed": seed,
+                "avg_mae_mm": result.metrics.get("avg_mae_mm"),
+                "z_avg_mae_mm": result.metrics.get("z_avg_mae_mm"),
+                "axis_mae_mm": dict(result.metrics.get("axis_mae_mm") or {}),
+                "avg_r2": result.metrics.get("avg_r2"),
+                "avg_mae_ci95": list(result.metrics.get("avg_mae_ci95") or []),
+                "clinical_3d": (result.metrics.get("clinical_3d") or {}),
+            }
+        )
+
+    def _mean_std(values: list[float]) -> dict[str, float]:
+        arr = np.asarray([v for v in values if v is not None and np.isfinite(v)], dtype=float)
+        if arr.size == 0:
+            return {"mean": float("nan"), "std": float("nan")}
+        return {"mean": float(arr.mean()), "std": float(arr.std(ddof=0))}
+
+    aggregated = {
+        "avg_mae_mm": _mean_std([r["avg_mae_mm"] for r in per_seed]),
+        "z_avg_mae_mm": _mean_std([r["z_avg_mae_mm"] for r in per_seed]),
+        "avg_r2": _mean_std([r["avg_r2"] for r in per_seed]),
+        "axis_mae_mm": {
+            axis: _mean_std(
+                [
+                    float((r.get("axis_mae_mm") or {}).get(axis, float("nan")))
+                    for r in per_seed
+                ]
+            )
+            for axis in ("x", "y", "z")
+        },
+        "within_10mm_ratio": _mean_std(
+            [
+                float(
+                    ((r.get("clinical_3d") or {}).get("within_10mm_ratio", float("nan")))
+                )
+                for r in per_seed
+            ]
+        ),
+        "mean_3d_error_mm": _mean_std(
+            [
+                float(
+                    ((r.get("clinical_3d") or {}).get("endpoint_error_mean_mae_mm", float("nan")))
+                )
+                for r in per_seed
+            ]
+        ),
+    }
+    return {
+        "seeds": seed_list,
+        "n_splits": n_splits,
+        "weight_mode": weight_mode,
+        "per_seed": per_seed,
+        "aggregated": aggregated,
+        "results": results,
+    }
+
+
+def paired_compare_repeated(
+    candidate: Mapping[str, Any],
+    reference: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Pairwise delta of repeated-CV aggregates (candidate − reference)."""
+    cand = candidate.get("aggregated") or {}
+    ref = reference.get("aggregated") or {}
+
+    def _delta(key: str) -> float:
+        c = (cand.get(key) or {}).get("mean", float("nan"))
+        r = (ref.get(key) or {}).get("mean", float("nan"))
+        if not np.isfinite(c) or not np.isfinite(r):
+            return float("nan")
+        return float(c - r)
+
+    return {
+        "delta_avg_mae_mm": _delta("avg_mae_mm"),
+        "delta_z_avg_mae_mm": _delta("z_avg_mae_mm"),
+        "delta_within_10mm_ratio": _delta("within_10mm_ratio"),
+    }
 
 
 def evaluate_nested_proxy_vs_honest(

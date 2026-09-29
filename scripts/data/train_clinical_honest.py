@@ -168,6 +168,24 @@ def main() -> int:
         default=None,
         help="na_boku cohort CSV for na_trend features",
     )
+    parser.add_argument(
+        "--holdout",
+        type=Path,
+        default=ROOT / "config" / "holdout_patients.yaml",
+        help="Holdout YAML; passed to build_vybor_from_xlsx.py",
+    )
+    parser.add_argument(
+        "--xlsx",
+        type=Path,
+        default=None,
+        help="Displacement workbook for rebuild (default: parser DEFAULT_XLSX_PATH)",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Optional JSON with AdaptiveEnsembleTrainer kwargs (Variant A)",
+    )
     args = parser.parse_args()
     z_head = args.z_head
     model_path = args.model_path or (
@@ -179,15 +197,18 @@ def main() -> int:
 
     vybor_path = args.vybor_csv or DEFAULT_OUTPUT_CSV
     if not args.skip_vybor_build:
-        subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "scripts" / "data" / "build_vybor_from_xlsx.py"),
-                "--no-boku",
-            ],
-            cwd=str(ROOT),
-            check=True,
-        )
+        build_cmd = [
+            sys.executable,
+            str(ROOT / "scripts" / "data" / "build_vybor_from_xlsx.py"),
+            "--no-boku",
+            "--holdout",
+            str(args.holdout),
+        ]
+        if args.xlsx is not None:
+            build_cmd.extend(["--xlsx", str(args.xlsx)])
+        if args.vybor_csv is not None:
+            build_cmd.extend(["--out", str(args.vybor_csv)])
+        subprocess.run(build_cmd, cwd=str(ROOT), check=True)
     elif not vybor_path.exists():
         raise FileNotFoundError(
             f"--skip-vybor-build set but {vybor_path} missing. "
@@ -204,6 +225,10 @@ def main() -> int:
         f"(both kidneys={both}, one-sided={len(df) - both}; "
         f"dropped {before - len(df)} with no labeled side)"
     )
+
+    from src.data.holdout import assert_no_holdout_leak  # noqa: E402
+
+    assert_no_holdout_leak(df)
 
     na_trends = NaTrendStore.fit(
         spine_path=args.spine_csv,
@@ -222,11 +247,17 @@ def main() -> int:
     name_col = "full_name" if "full_name" in df.columns else "case_id"
     groups = df[name_col].astype(str).values
 
-    trainer = AdaptiveEnsembleTrainer(
-        z_head=z_head,
-        enrichment_mode="na_trends",
-        na_trend_store=na_trends,
-    )
+    trainer_kwargs = {
+        "z_head": z_head,
+        "enrichment_mode": "na_trends",
+        "na_trend_store": na_trends,
+    }
+    if args.config is not None:
+        cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
+        if not isinstance(cfg, dict):
+            raise ValueError("--config must be a JSON object")
+        trainer_kwargs.update({k: v for k, v in cfg.items() if k != "na_trend_store"})
+    trainer = AdaptiveEnsembleTrainer(**trainer_kwargs)
     prepared = trainer.prepare_training_data_fit(df)
     if prepared[0] is None:
         raise RuntimeError("prepare_training_data_fit failed")

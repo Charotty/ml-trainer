@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
@@ -49,6 +50,11 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
         inner_n_splits: int | None = None,
         model_kind: str = "ensemble",
         yz_target_boost: bool = True,
+        yz_boost_mode: str | None = None,
+        loss_profile: str | None = None,
+        estimator_overrides: Mapping[str, Mapping[str, Any]] | dict | None = None,
+        ensemble_weight_mode: str | None = None,
+        z_postprocess: str | None = None,
         encode_categoricals: bool = True,
         add_missing_indicators: bool = True,
         drop_feature_groups: tuple[str, ...] | list[str] | None = None,
@@ -64,13 +70,16 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
             verbose=True,
         )
         self.z_head = z_head
-        if estimator_profile not in {"production", "tiny"}:
+        if estimator_profile not in {"production", "tiny", "small_n"}:
             raise ValueError(
-                f"estimator_profile must be 'production' or 'tiny', got {estimator_profile!r}"
+                f"estimator_profile must be 'production', 'tiny', or 'small_n', "
+                f"got {estimator_profile!r}"
             )
         self.estimator_profile = estimator_profile
         self.inner_n_splits = (
-            int(inner_n_splits) if inner_n_splits is not None else (2 if estimator_profile == "tiny" else 3)
+            int(inner_n_splits)
+            if inner_n_splits is not None
+            else (2 if estimator_profile in {"tiny", "small_n"} else 3)
         )
         kind_key = str(model_kind).strip().lower()
         if kind_key not in MODEL_KIND_ALIASES:
@@ -78,7 +87,16 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                 f"model_kind must be one of {sorted(set(MODEL_KIND_ALIASES.values()))}, got {model_kind!r}"
             )
         self.model_kind = MODEL_KIND_ALIASES[kind_key]
-        self.yz_target_boost = bool(yz_target_boost)
+        # yz_boost_mode overrides the boolean flag when set.
+        mode = (yz_boost_mode or ("default" if yz_target_boost else "off")).strip().lower()
+        if mode not in {"default", "off", "soft", "y_only"}:
+            raise ValueError(f"yz_boost_mode must be default|off|soft|y_only, got {mode!r}")
+        self.yz_boost_mode = mode
+        self.yz_target_boost = mode != "off"
+        self.loss_profile = loss_profile
+        self.estimator_overrides = dict(estimator_overrides or {})
+        self.ensemble_weight_mode = (ensemble_weight_mode or "optimized").strip().lower()
+        self.z_postprocess = z_postprocess
         self._inner_fold_weight_traces: dict = {}
         self._inner_weight_variance: dict = {}
         self._optimized_weights: dict = {}
@@ -257,7 +275,10 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
         if target_name:
             print(f"  Target profile: {target_name}")
         return make_base_models(
-            estimator_profile=self.estimator_profile, target_name=target_name
+            estimator_profile=self.estimator_profile,
+            target_name=target_name,
+            loss_profile=self.loss_profile,
+            estimator_overrides=self.estimator_overrides or None,
         )
 
     def _per_target_sample_weights(
@@ -267,7 +288,8 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
         base_weights: np.ndarray | None = None,
     ) -> np.ndarray | None:
         n = int(np.asarray(y_target).reshape(-1).size)
-        if not self.yz_target_boost:
+        mode = getattr(self, "yz_boost_mode", "default" if self.yz_target_boost else "off")
+        if mode == "off" or not self.yz_target_boost:
             if base_weights is None:
                 return None
             return np.asarray(base_weights, dtype=float).reshape(-1)
@@ -277,12 +299,25 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
             out = np.ones(n, dtype=float)
         abs_y = np.abs(np.asarray(y_target, dtype=float).reshape(-1))
         axis = target_name.split("_")[-1]
-        if axis == "z":
-            boost = 1.0 + np.clip(abs_y / 15.0, 0.0, 2.5)
-        elif axis == "y":
-            boost = 1.0 + np.clip(abs_y / 12.0, 0.0, 1.8)
-        else:
-            boost = np.ones_like(abs_y)
+        if mode == "soft":
+            if axis == "z":
+                boost = 1.0 + np.clip(abs_y / 30.0, 0.0, 1.0)
+            elif axis == "y":
+                boost = 1.0 + np.clip(abs_y / 24.0, 0.0, 1.0)
+            else:
+                boost = np.ones_like(abs_y)
+        elif mode == "y_only":
+            if axis == "y":
+                boost = 1.0 + np.clip(abs_y / 12.0, 0.0, 1.8)
+            else:
+                boost = np.ones_like(abs_y)
+        else:  # default
+            if axis == "z":
+                boost = 1.0 + np.clip(abs_y / 15.0, 0.0, 2.5)
+            elif axis == "y":
+                boost = 1.0 + np.clip(abs_y / 12.0, 0.0, 1.8)
+            else:
+                boost = np.ones_like(abs_y)
         return out * boost
 
     @staticmethod
@@ -692,6 +727,37 @@ class AdaptiveEnsembleTrainer(FeatureTransformer):
                     target_name,
                     sample_weight=w_wt,
                 )
+
+            # Stage 6 ensemble blending modes (applied after base weight search).
+            ewm = getattr(self, "ensemble_weight_mode", "optimized") or "optimized"
+            if ewm == "equal" or weight_mode == "equal":
+                optimized_weights = {n: 1.0 / len(base_models) for n in base_models.keys()}
+            elif ewm == "fixed_prior":
+                priors = self.adaptive_weights.get(target_name, {})
+                total = sum(priors.get(n, 1.0) for n in base_models.keys()) or len(base_models)
+                optimized_weights = {n: priors.get(n, 1.0) / total for n in base_models.keys()}
+            elif ewm == "shrink":
+                equal = {n: 1.0 / len(base_models) for n in base_models.keys()}
+                optimized_weights = {
+                    n: 0.5 * float(optimized_weights.get(n, 0.0)) + 0.5 * equal[n]
+                    for n in base_models.keys()
+                }
+                tot = sum(optimized_weights.values()) or 1.0
+                optimized_weights = {n: w / tot for n, w in optimized_weights.items()}
+            elif ewm == "best_per_axis":
+                # Keep only the single largest weight (winner-take-all per target).
+                best_name = max(optimized_weights, key=optimized_weights.get)
+                optimized_weights = {n: (1.0 if n == best_name else 0.0) for n in base_models.keys()}
+            elif ewm == "stacking":
+                # Non-negative ridge on member OOF preds is approximated by
+                # shrink+optimized blend; full stacking uses stacker in tuner when available.
+                equal = {n: 1.0 / len(base_models) for n in base_models.keys()}
+                optimized_weights = {
+                    n: 0.7 * float(optimized_weights.get(n, 0.0)) + 0.3 * equal[n]
+                    for n in base_models.keys()
+                }
+                tot = sum(optimized_weights.values()) or 1.0
+                optimized_weights = {n: w / tot for n, w in optimized_weights.items()}
             self._optimized_weights[target_name] = optimized_weights
             optimized_ensemble = self.create_optimized_voting_ensemble(
                 base_models, target_name, optimized_weights

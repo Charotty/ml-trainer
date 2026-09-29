@@ -1,0 +1,51 @@
+# Control holdout for Variant A. NEVER include these patients in training.
+# Surname matching is case-insensitive, ё→е, and Latin aliases are accepted.
+version: 1
+patients:
+  - surname: Вегерин
+    aliases: [Vegerin, Вегерин]
+    case_id: 67bb750c-075e-4ced-a0f0-74640701c0de
+    report: reports/report_67bb750c-075e-4ced-a0f0-74640701c0de.json
+    excel_rows: [133]  # 1-based sheet rows in «Смещение - конечное -13 .xlsx»
+    has_ground_truth: true
+    score_mode: mae  # in sheet; compare predicted vs lateral−supine middle
+  - surname: Залесская
+    aliases: [Zalesskaya, Залесская]
+    case_id: 373527b9-6205-4864-af0a-bc456bd0f9f9
+    report: reports/report_373527b9-6205-4864-af0a-bc456bd0f9f9.json
+    excel_rows: []
+    has_ground_truth: false
+    score_mode: plausibility  # not in -13 sheet
+  - surname: Сомова
+    aliases: [Somova, Сомова]
+    case_id: 11133fb7-74b7-4374-97e1-04a908379673
+    report: reports/report_11133fb7-74b7-4374-97e1-04a908379673.json
+    excel_rows: [132]
+    has_ground_truth: true
+    score_mode: mae
+  - surname: Шилова
+    aliases: [Shilova, Шилова]
+    case_id: acadbc2d-8c27-479d-8f72-30bc9c73e0f0
+    report: reports/report_acadbc2d-8c27-479d-8f72-30bc9c73e0f0.json
+    excel_rows: []
+    has_ground_truth: false
+    score_mode: plausibility
+  - surname: Кремас
+    aliases: [Кремас, Кремс, Kremas, Krems]
+    case_id: cc02433e-cc2b-4c2c-9388-9f811e074b0a
+    report: reports/report_cc02433e-cc2b-4c2c-9388-9f811e074b0a.json
+    excel_rows: [131]
+    has_ground_truth: true
+    score_mode: mae
+    notes: "Left nephrectomy — left deltas stay empty / absent"
+xlsx_defaults:
+  path: "Смещение - конечное -13 .xlsx"
+  repeated_header_row: 130  # 1-based; skip this header and treat following №1..3 as holdout
+delta_definition: "lateral middle minus supine middle"
+targets:
+  - kidney_left_delta_x
+  - kidney_left_delta_y
+  - kidney_left_delta_z
+  - kidney_right_delta_x
+  - kidney_right_delta_y
+  - kidney_right_delta_z

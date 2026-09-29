@@ -85,11 +85,14 @@ def make_base_models(
     *,
     estimator_profile: str = "production",
     target_name: str | None = None,
+    loss_profile: str | None = None,
+    estimator_overrides: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create unfitted RF/Lasso/Ridge/GBT members for one target."""
-    if estimator_profile not in {"production", "tiny"}:
+    if estimator_profile not in {"production", "tiny", "small_n"}:
         raise ValueError(
-            f"estimator_profile must be 'production' or 'tiny', got {estimator_profile!r}"
+            f"estimator_profile must be 'production', 'tiny', or 'small_n', "
+            f"got {estimator_profile!r}"
         )
     axis = target_name.split("_")[-1] if target_name else None
 
@@ -112,6 +115,26 @@ def make_base_models(
         }
         lasso_config = {"alpha": 0.5, "max_iter": 2000, "random_state": 42}
         ridge_config = {"alpha": 1.0, "solver": "auto", "random_state": 42}
+    elif estimator_profile == "small_n":
+        rf_config = {
+            "n_estimators": 300,
+            "max_depth": 6,
+            "min_samples_split": 10,
+            "min_samples_leaf": 10,
+            "max_features": 0.4,
+            "random_state": 42,
+            "n_jobs": -1,
+        }
+        gbt_config = {
+            "n_estimators": 200,
+            "learning_rate": 0.04,
+            "max_depth": 2,
+            "min_samples_leaf": 10,
+            "subsample": 0.7,
+            "random_state": 42,
+        }
+        lasso_config = {"alpha": 0.15, "max_iter": 5000, "random_state": 42}
+        ridge_config = {"alpha": 1.5, "solver": "auto", "random_state": 42}
     else:
         rf_config = {
             "n_estimators": 600 if axis in ("y", "z") else 500,
@@ -142,6 +165,38 @@ def make_base_models(
             "solver": "auto",
             "random_state": 42,
         }
+
+    # loss_profile overlays (stage 3). Default keeps production Z-huber behaviour.
+    profile = (loss_profile or "default").strip().lower()
+    if profile == "absolute_error":
+        rf_config["criterion"] = "absolute_error"
+        gbt_config["loss"] = "absolute_error"
+        gbt_config.pop("alpha", None)
+    elif profile == "quantile_0.5":
+        gbt_config["loss"] = "quantile"
+        gbt_config["alpha"] = 0.5
+    elif profile.startswith("huber"):
+        gbt_config["loss"] = "huber"
+        if profile == "huber_0.5":
+            gbt_config["alpha"] = 0.5
+        elif profile == "huber_0.7":
+            gbt_config["alpha"] = 0.7
+        elif profile in {"huber_0.9", "huber_all_axes"}:
+            gbt_config["alpha"] = 0.9
+        else:
+            gbt_config["alpha"] = 0.9
+        if profile == "huber_all_axes" or axis == "z":
+            pass  # huber already set
+    elif profile == "default":
+        pass
+    else:
+        raise ValueError(f"Unknown loss_profile={loss_profile!r}")
+
+    if estimator_overrides:
+        rf_config.update(dict(estimator_overrides.get("RandomForest") or {}))
+        gbt_config.update(dict(estimator_overrides.get("GradientBoosting") or {}))
+        lasso_config.update(dict(estimator_overrides.get("Lasso") or {}))
+        ridge_config.update(dict(estimator_overrides.get("Ridge") or {}))
 
     return {
         "RandomForest": RandomForestRegressor(**rf_config),
