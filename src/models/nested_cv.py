@@ -465,25 +465,53 @@ def evaluate_repeated_nested_cv(
             group_seed=seed,
         )
         results.append(result)
-        per_seed.append(
-            {
-                "group_seed": seed,
-                "avg_mae_mm": result.metrics.get("avg_mae_mm"),
-                "z_avg_mae_mm": result.metrics.get("z_avg_mae_mm"),
-                "axis_mae_mm": dict(result.metrics.get("axis_mae_mm") or {}),
-                "avg_r2": result.metrics.get("avg_r2"),
-                "avg_mae_ci95": list(result.metrics.get("avg_mae_ci95") or []),
-                "clinical_3d": (result.metrics.get("clinical_3d") or {}),
-            }
-        )
+        per_seed.append(per_seed_summary(result.metrics, seed))
 
+    return {
+        "seeds": seed_list,
+        "n_splits": n_splits,
+        "weight_mode": weight_mode,
+        "per_seed": per_seed,
+        "aggregated": aggregate_per_seed(per_seed),
+        "results": results,
+    }
+
+
+def per_seed_summary(metrics: Mapping[str, Any], seed: int | None) -> dict[str, Any]:
+    return {
+        "group_seed": seed,
+        "avg_mae_mm": metrics.get("avg_mae_mm"),
+        "z_avg_mae_mm": metrics.get("z_avg_mae_mm"),
+        "axis_mae_mm": dict(metrics.get("axis_mae_mm") or {}),
+        "avg_r2": metrics.get("avg_r2"),
+        "avg_mae_ci95": list(metrics.get("avg_mae_ci95") or []),
+        "per_target_mae_mm": dict(metrics.get("per_target_mae_mm") or {}),
+        "clinical_3d": (metrics.get("clinical_3d") or {}),
+    }
+
+
+def summarize_oof_with_clinical(
+    frame: pd.DataFrame, pred_df: pd.DataFrame, target_cols: list[str]
+) -> dict[str, Any]:
+    """Same metric block as nested OOF (used when post-processing cached OOF)."""
+    frame = frame.reset_index(drop=True)
+    pred_df = pred_df.reset_index(drop=True)
+    metrics = summarize_oof(frame[target_cols], pred_df, target_cols)
+    clinical = compute_clinical_report(
+        frame[target_cols], pred_df, frame=frame, target_columns=target_cols
+    )
+    metrics["clinical_3d"] = clinical.get("clinical_3d")
+    return metrics
+
+
+def aggregate_per_seed(per_seed: list[dict[str, Any]]) -> dict[str, Any]:
     def _mean_std(values: list[float]) -> dict[str, float]:
         arr = np.asarray([v for v in values if v is not None and np.isfinite(v)], dtype=float)
         if arr.size == 0:
             return {"mean": float("nan"), "std": float("nan")}
         return {"mean": float(arr.mean()), "std": float(arr.std(ddof=0))}
 
-    aggregated = {
+    return {
         "avg_mae_mm": _mean_std([r["avg_mae_mm"] for r in per_seed]),
         "z_avg_mae_mm": _mean_std([r["z_avg_mae_mm"] for r in per_seed]),
         "avg_r2": _mean_std([r["avg_r2"] for r in per_seed]),
@@ -502,14 +530,6 @@ def evaluate_repeated_nested_cv(
         "mean_3d_error_mm": _mean_std(
             [clinical_3d_value(r.get("clinical_3d"), "mean_mm") for r in per_seed]
         ),
-    }
-    return {
-        "seeds": seed_list,
-        "n_splits": n_splits,
-        "weight_mode": weight_mode,
-        "per_seed": per_seed,
-        "aggregated": aggregated,
-        "results": results,
     }
 
 

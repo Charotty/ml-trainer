@@ -39,10 +39,14 @@ from src.models.ensemble import AdaptiveEnsembleTrainer  # noqa: E402
 from src.models.ensemble.serializer import build_runtime_payload  # noqa: E402
 from src.models.nested_cv import (  # noqa: E402
     DEFAULT_REPEAT_SEEDS,
+    aggregate_per_seed,
     evaluate_repeated_nested_cv,
     paired_compare_repeated,
+    patient_group_column,
+    per_seed_summary,
+    summarize_oof_with_clinical,
 )
-from src.models.z_calibrator_oof import SideZCalibrator, fit_calibrator_oof_gated  # noqa: E402
+from src.models.z_oof_postprocess import calibrate_oof_z, fit_final_calibrators  # noqa: E402
 
 JOURNAL_PATH = ROOT / "docs" / "EXPERIMENTS_VARIANT_A.md"
 EXPERIMENTS_DIR = ROOT / "models" / "experiments"
@@ -181,6 +185,7 @@ def fit_and_save_experiment_model(
     run_id: str,
     trainer_kwargs: dict[str, Any],
     weight_mode: str,
+    z_calibrators: dict[str, Any] | None = None,
 ) -> Path:
     EXPERIMENTS_DIR.mkdir(parents=True, exist_ok=True)
     enrichment = trainer_kwargs.get("enrichment_mode", "none")
@@ -198,20 +203,11 @@ def fit_and_save_experiment_model(
     groups = df[name_col].astype(str).values
     trainer.fit_final(X_train, y_train, groups=groups, weight_mode=weight_mode)
 
-    left_cal = fit_calibrator_oof_gated(
-        SideZCalibrator(side="left"),
-        df,
-        _raw_z_preds(trainer, df, Z_TARGETS[0]),
-        df[Z_TARGETS[0]].astype(float).values,
-        groups,
-    )
-    right_cal = fit_calibrator_oof_gated(
-        SideZCalibrator(side="right"),
-        df,
-        _raw_z_preds(trainer, df, Z_TARGETS[1]),
-        df[Z_TARGETS[1]].astype(float).values,
-        groups,
-    )
+    # Z calibrators are fitted on nested-CV OOF raw predictions (see
+    # src/models/z_oof_postprocess.py); in-sample predictions leave nothing to fix.
+    cals = z_calibrators or {}
+    left_cal = cals.get("left")
+    right_cal = cals.get("right")
     payload = build_runtime_payload(
         trainer,
         extras={
@@ -328,15 +324,24 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
     seeds = tuple(int(s) for s in args.seeds.split(","))
     EXPERIMENTS_DIR.mkdir(parents=True, exist_ok=True)
     cv_cache = EXPERIMENTS_DIR / f"{run_id}_cv.json"
-    if cv_cache.is_file():
-        cached = json.loads(cv_cache.read_text(encoding="utf-8"))
+    source_cache = cv_cache
+    if getattr(args, "cv_from", None):
+        # Reuse another run's OOF (identical trainer config), e.g. to evaluate a
+        # post-processing step without retraining.
+        source_cache = EXPERIMENTS_DIR / f"{args.cv_from}_cv.json"
+        if not source_cache.is_file():
+            raise FileNotFoundError(source_cache)
+    oof_by_seed: dict[str, dict[str, list]] = {}
+    if source_cache.is_file():
+        cached = json.loads(source_cache.read_text(encoding="utf-8"))
         agg = cached["aggregated"]
         per_seed = cached["per_seed"]
         per_t = cached["per_target_seed0"]
         ci = cached["ci95_seed0"]
         clinical = cached["clinical_seed0"]
         cv_seconds = float(cached.get("cv_seconds", 0.0))
-        print(f"[cv] loaded cached CV from {cv_cache}", flush=True)
+        oof_by_seed = cached.get("oof") or {}
+        print(f"[cv] loaded cached CV from {source_cache}", flush=True)
     else:
         t0 = time.time()
         repeated = evaluate_repeated_nested_cv(
@@ -359,6 +364,11 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
             for k, v in (seed0.metrics.get("clinical_3d") or {}).items()
             if isinstance(v, (int, float, str, type(None)))
         }
+        for seed, res in zip(seeds, repeated["results"]):
+            oof_by_seed[str(seed)] = {
+                col: [None if not np.isfinite(v) else float(v) for v in res.oof_predictions[col].tolist()]
+                for col in res.oof_predictions.columns
+            }
         cv_cache.write_text(
             json.dumps(
                 {
@@ -369,6 +379,7 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
                     "clinical_seed0": clinical,
                     "cv_seconds": cv_seconds,
                     "trainer_kwargs": {k: v for k, v in trainer_kwargs.items() if k != "na_trend_store"},
+                    "oof": oof_by_seed,
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -376,6 +387,35 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
             ),
             encoding="utf-8",
         )
+
+    z_calibrators = None
+    z_cal_usage: dict[str, Any] | None = None
+    if getattr(args, "z_calibrator", False):
+        if not oof_by_seed:
+            raise RuntimeError(
+                "--z-calibrator needs OOF predictions in the CV cache; rerun CV with the current code"
+            )
+        frame = df.reset_index(drop=True)
+        groups = frame[patient_group_column(frame)].astype(str).values
+        target_cols = [t for t in TARGET_NAMES if t in frame.columns]
+        new_per_seed = []
+        z_cal_usage = {}
+        for seed_key, cols in oof_by_seed.items():
+            oof_df = pd.DataFrame(
+                {c: [np.nan if v is None else v for v in vals] for c, vals in cols.items()}
+            )
+            cal_df, usage = calibrate_oof_z(frame, oof_df, groups)
+            z_cal_usage[seed_key] = usage
+            m = summarize_oof_with_clinical(frame, cal_df[target_cols], target_cols)
+            new_per_seed.append(per_seed_summary(m, int(seed_key)))
+        per_seed = new_per_seed
+        agg = aggregate_per_seed(per_seed)
+        per_t = per_seed[0].get("per_target_mae_mm") or {}
+        ci = per_seed[0].get("avg_mae_ci95") or [float("nan"), float("nan")]
+        first = next(iter(oof_by_seed.values()))
+        oof0 = pd.DataFrame({c: [np.nan if v is None else v for v in vals] for c, vals in first.items()})
+        z_calibrators = fit_final_calibrators(frame, oof0, groups)
+        print(f"[z-calibrator] usage={z_cal_usage} final={ {k: v is not None for k, v in z_calibrators.items()} }", flush=True)
     axis = agg.get("axis_mae_mm") or {}
 
     model_path = None
@@ -386,6 +426,7 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
             run_id=run_id,
             trainer_kwargs=dict(trainer_kwargs),
             weight_mode=args.weight_mode,
+            z_calibrators=z_calibrators,
         )
         from scripts.validation.eval_holdout import evaluate_holdout
 
@@ -436,11 +477,18 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         "model_path": str(model_path) if model_path else None,
         "raw": raw,
         "verdict": "pending",
+        "cv_from": getattr(args, "cv_from", None),
+        "z_calibrator_usage": z_cal_usage,
+        "z_calibrators_final": (
+            {k: (v.describe() if v is not None else None) for k, v in z_calibrators.items()}
+            if z_calibrators
+            else None
+        ),
     }
     out_json = EXPERIMENTS_DIR / f"{run_id}_metrics.json"
     out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
-    if not args.defer_journal:
-        payload = finalize_run(out_json, write_journal=not args.no_journal)
+    if not args.defer_journal and not args.no_journal:
+        payload = finalize_run(out_json, write_journal=True)
     print(json.dumps({"run_id": run_id, "verdict": payload.get("verdict"), "avg_mae": avg_mae, "z_mae": z_mae, "holdout": holdout_mae}, ensure_ascii=False), flush=True)
     return payload
 
@@ -579,6 +627,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ensemble-weight-mode", default=None)
     p.add_argument("--estimator-overrides", default=None, help="JSON dict of RF/GBT overrides")
     p.add_argument("--z-postprocess", default=None)
+    p.add_argument(
+        "--z-calibrator",
+        action="store_true",
+        help="Span/lordosis Z calibrator fitted on nested OOF predictions (honest second-level CV)",
+    )
+    p.add_argument(
+        "--cv-from",
+        default=None,
+        help="Reuse CV/OOF cache of another run_id with the same trainer config",
+    )
     p.add_argument("--inner-tree-search", action="store_true")
     p.add_argument(
         "--per-axis-features",
