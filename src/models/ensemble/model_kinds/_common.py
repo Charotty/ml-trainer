@@ -58,6 +58,22 @@ class MultiOutputColumnView(BaseEstimator, RegressorMixin):
         return pred[:, pos]
 
 
+class DropSampleWeight(BaseEstimator, RegressorMixin):
+    """Wrapper that ignores ``sample_weight`` (for estimators/searches without support)."""
+
+    def __init__(self, estimator=None):
+        self.estimator = estimator
+
+    def fit(self, X, y, sample_weight=None):
+        del sample_weight
+        self.estimator_ = clone(self.estimator)
+        self.estimator_.fit(np.asarray(X, dtype=float), np.asarray(y, dtype=float).reshape(-1))
+        return self
+
+    def predict(self, X):
+        return np.asarray(self.estimator_.predict(np.asarray(X, dtype=float)), dtype=float).reshape(-1)
+
+
 def side_axis_group(target_name: str, target_names: Sequence[str]) -> tuple[list[int], int]:
     """Indices of the same-kidney x/y/z targets and the position of target_name."""
     side = "left" if "_left_" in target_name else "right"
