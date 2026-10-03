@@ -1,4 +1,8 @@
-"""Psoas cross-section at the L3 centroid.
+"""Psoas cross-section at the kidney midpoint.
+
+The manual thickness and area are taken on the same axial level as the other
+renal measurements (about the middle of that kidney), not on the L3 centroid.
+Psoas thickens caudally, so an L3 slice runs high.
 
 Prefers ``psoas_major`` from the ``abdominal_muscles`` task. Falls back to
 ``iliopsoas`` from the ``total`` task, which includes iliacus and is marked
@@ -21,23 +25,33 @@ def _inplane_area_mm2(volume: AnatomyVolume) -> float:
     return float(spans[0] * spans[1])
 
 
-def measure_psoas(volume: AnatomyVolume, z_mm: Optional[float]) -> Dict[str, object]:
+def measure_psoas(
+    volume: AnatomyVolume,
+    z_mm: Optional[float] = None,
+    z_by_side: Optional[Dict[str, Optional[float]]] = None,
+) -> Dict[str, object]:
+    """Measure each side at ``z_by_side[side]`` when given, otherwise at ``z_mm``."""
     out: Dict[str, object] = {}
     voxel_area = _inplane_area_mm2(volume)
     for side in ("left", "right"):
         area_key = f"kidney_{side}_psoas_area_cm2"
         thick_key = f"kidney_{side}_psoas_thickness_mm"
-        if z_mm is None:
+        side_z = z_by_side.get(side) if z_by_side is not None else None
+        if z_by_side is not None:
+            z_mm_side = side_z
+        else:
+            z_mm_side = z_mm
+        if z_mm_side is None:
             out[area_key] = None
             out[thick_key] = None
             out[f"{area_key}_qc"] = QC_MISSING
             out[f"{thick_key}_qc"] = QC_MISSING
             continue
-        major = volume.slice_points(f"psoas_major_{side}", z_mm)
+        major = volume.slice_points(f"psoas_major_{side}", z_mm_side)
         qc = "ok"
         points = major
         if len(points) == 0:
-            points = volume.slice_points(f"iliopsoas_{side}", z_mm)
+            points = volume.slice_points(f"iliopsoas_{side}", z_mm_side)
             qc = QC_APPROX
         if len(points) == 0:
             out[area_key] = None

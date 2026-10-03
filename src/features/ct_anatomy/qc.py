@@ -41,14 +41,17 @@ SHARED_RANGES: Dict[str, Tuple[float, float]] = {
 }
 
 PER_SIDE_RANGES: Dict[str, Tuple[float, float]] = {
-    "upper_pole_to_rib11_mm": (0.0, 250.0),
-    "lower_pole_to_iliac_crest_mm": (0.0, 250.0),
-    "upper_pole_to_diaphragm_mm": (0.0, 250.0),
+    # Signed cranio-caudal gaps. The iliac value is negative when the crest
+    # sits above the lower pole; rib and diaphragm use the same sign.
+    "upper_pole_to_rib11_mm": (-200.0, 250.0),
+    "lower_pole_to_iliac_crest_mm": (-200.0, 250.0),
+    "upper_pole_to_diaphragm_mm": (-200.0, 250.0),
     "medial_to_spine_mm": (0.0, 80.0),
     "perirenal_dorsal_mm": (0.0, 60.0),
     "perirenal_ventral_mm": (0.0, 60.0),
     "perirenal_lateral_mm": (0.0, 60.0),
-    "perirenal_hu": (-160.0, 30.0),
+    # Posterior-pad mean, not a fat-only window, so mildly soft values are kept.
+    "perirenal_hu": (-200.0, 50.0),
     "perirenal_stranding": (0.0, 1.0),
     "map_score": (0.0, 5.0),
     "psoas_area_cm2": (0.3, 40.0),

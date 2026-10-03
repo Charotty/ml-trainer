@@ -157,35 +157,65 @@ def test_skin_mask_without_vertebrae_still_fills_body_size():
 
 
 def test_kidney_landmark_distances():
-    shape = (80, 80, 90)
+    shape = (90, 80, 100)
     kidney = np.zeros(shape, dtype=bool)
+    left = np.zeros(shape, dtype=bool)
     rib = np.zeros(shape, dtype=bool)
     hip = np.zeros(shape, dtype=bool)
     liver = np.zeros(shape, dtype=bool)
-    spine = np.zeros(shape, dtype=bool)
+    lung = np.zeros(shape, dtype=bool)
+    body = np.zeros(shape, dtype=bool)
+    process = np.zeros(shape, dtype=bool)
+    t11 = np.zeros(shape, dtype=bool)
     kidney[10:20, 30:40, 30:50] = True
-    rib[10:20, 30:40, 60:70] = True
-    hip[10:20, 30:40, 5:15] = True
+    left[60:70, 30:40, 30:50] = True
+    # Medial rib end next to T11, plus a low anterior tip that must be ignored.
+    rib[38:42, 30:40, 68:72] = True
+    rib[4:8, 30:40, 54:57] = True
+    t11[42:52, 30:40, 65:75] = True
+    # Crest is offset in Y; only the vertical gap counts. z max of the crest is 14.
+    hip[10:20, 60:70, 10:15] = True
     liver[10:20, 30:40, 70:76] = True
-    spine[35:45, 30:40, 30:50] = True
+    lung[60:70, 30:40, 80:88] = True
+    body[35:45, 30:40, 30:50] = True
+    process[25:36, 30:40, 30:50] = True
     measured = measure_kidney_distances(
         _volume(
             shape,
             {
                 "kidney_right": kidney,
+                "kidney_left": left,
                 "rib_right_11": rib,
+                "vertebrae_T11": t11,
                 "hip_right": hip,
                 "liver": liver,
-                "vertebrae_L3": spine,
+                "lung_lower_lobe_left": lung,
+                "vertebrae_L3": body | process,
+                "vertebrae_body": body,
             },
         )
     )
-    assert measured["kidney_right_upper_pole_to_rib11_mm"] == pytest.approx(11.0)
-    assert measured["kidney_right_lower_pole_to_iliac_crest_mm"] == pytest.approx(16.0)
-    assert measured["kidney_right_upper_pole_to_diaphragm_mm"] == pytest.approx(26.0)
+    # Upper pole z=49, medial rib end z=69.5. The anterior tip at z=54 is ignored.
+    assert measured["kidney_right_upper_pole_to_rib11_mm"] == pytest.approx(20.5, abs=1.0)
+    # Lower pole z=30, crest z=14.
+    assert measured["kidney_right_lower_pole_to_iliac_crest_mm"] == pytest.approx(16.0, abs=0.6)
+    # Underside of the liver in the column above the pole, not the liver top.
+    assert measured["kidney_right_upper_pole_to_diaphragm_mm"] == pytest.approx(21.0, abs=0.6)
     assert measured["kidney_right_upper_pole_to_diaphragm_mm_qc"] == "approx"
-    assert measured["kidney_right_medial_to_spine_mm"] == pytest.approx(16.0)
-    assert measured["kidney_left_upper_pole_to_rib11_mm"] is None
+    assert measured["kidney_left_upper_pole_to_diaphragm_mm"] == pytest.approx(31.0, abs=0.6)
+    # Vertebral body starts at x=35. The transverse process at x=25 must not close the gap.
+    assert measured["kidney_right_medial_to_spine_mm"] == pytest.approx(16.0, abs=0.6)
+    assert measured["kidney_right_medial_to_spine_mm_qc"] == "ok"
+
+
+def test_iliac_distance_is_negative_when_the_crest_is_above_the_pole():
+    shape = (40, 40, 60)
+    kidney = np.zeros(shape, dtype=bool)
+    hip = np.zeros(shape, dtype=bool)
+    kidney[10:20, 10:20, 10:20] = True
+    hip[10:20, 10:20, 40:50] = True
+    measured = measure_kidney_distances(_volume(shape, {"kidney_right": kidney, "hip_right": hip}))
+    assert measured["kidney_right_lower_pole_to_iliac_crest_mm"] == pytest.approx(-39.0, abs=0.6)
 
 
 def test_perirenal_ray_and_map_bins():
@@ -202,7 +232,49 @@ def test_perirenal_ray_and_map_bins():
     assert map_points(5.0, 0.0) == 0.0
 
 
-def test_psoas_area_on_l3_slice():
+def test_perirenal_ray_skips_partial_volume_rim():
+    shape = (40, 80, 5)
+    kidney = np.zeros(shape, dtype=bool)
+    kidney[10:20, 20:40, 2] = True
+    hu = np.full(shape, 40.0)
+    hu[10:20, 40:42, 2] = 30.0
+    hu[10:20, 42:50, 2] = -110.0
+    measured = measure_perirenal(_volume(shape, {"kidney_left": kidney}, hu=hu))
+    assert measured["kidney_left_perirenal_dorsal_mm"] == pytest.approx(8.0, abs=1.0)
+
+
+def test_lateral_fat_stops_at_the_organ_not_a_sideways_ray():
+    shape = (80, 80, 12)
+    kidney = np.zeros(shape, dtype=bool)
+    liver = np.zeros(shape, dtype=bool)
+    spleen = np.zeros(shape, dtype=bool)
+    kidney[40:55, 30:45, 4:8] = True
+    liver[28:35, 30:45, 4:8] = True
+    left = np.zeros(shape, dtype=bool)
+    left[10:25, 30:45, 4:8] = True
+    spleen[32:40, 30:45, 4:8] = True
+    hu = np.full(shape, 40.0)
+    measured = measure_perirenal(
+        _volume(shape, {"kidney_right": kidney, "kidney_left": left, "liver": liver, "spleen": spleen}, hu=hu)
+    )
+    assert measured["kidney_right_perirenal_lateral_mm"] == pytest.approx(6.0, abs=1.0)
+    assert measured["kidney_right_perirenal_lateral_mm_qc"] == "ok"
+    assert measured["kidney_left_perirenal_lateral_mm"] == pytest.approx(8.0, abs=1.0)
+    assert measured["kidney_left_perirenal_lateral_mm_qc"] == "ok"
+
+
+def test_perirenal_density_uses_the_posterior_pad():
+    shape = (40, 80, 5)
+    kidney = np.zeros(shape, dtype=bool)
+    kidney[10:30, 20:40, 2] = True
+    hu = np.full(shape, 400.0)
+    hu[10:30, 41:49, 2] = -80.0
+    hu[10:30, 5:12, 2] = -150.0
+    measured = measure_perirenal(_volume(shape, {"kidney_left": kidney}, hu=hu))
+    assert measured["kidney_left_perirenal_hu"] == pytest.approx(-80.0, abs=15.0)
+
+
+def test_psoas_area_on_the_requested_slice():
     shape = (80, 80, 20)
     psoas = np.zeros(shape, dtype=bool)
     psoas[40:50, 40:50, 8] = True
@@ -210,6 +282,26 @@ def test_psoas_area_on_l3_slice():
     assert measured["kidney_right_psoas_area_cm2"] == pytest.approx(1.0)
     assert measured["kidney_right_psoas_thickness_mm"] == pytest.approx(9.0)
     assert measured["kidney_right_psoas_area_cm2_qc"] == "ok"
+
+
+def test_psoas_level_follows_each_kidney():
+    shape = (40, 40, 30)
+    right = np.zeros(shape, dtype=bool)
+    left = np.zeros(shape, dtype=bool)
+    right[10:20, 10:16, 5] = True
+    left[10:20, 10:22, 20] = True
+    measured = measure_psoas(
+        _volume(shape, {"psoas_major_right": right, "psoas_major_left": left}),
+        z_by_side={"right": 5.0, "left": 20.0},
+    )
+    assert measured["kidney_right_psoas_thickness_mm"] == pytest.approx(5.0)
+    assert measured["kidney_left_psoas_thickness_mm"] == pytest.approx(11.0)
+    assert measured["kidney_right_psoas_area_cm2"] is not None
+    missing = measure_psoas(
+        _volume(shape, {"psoas_major_right": right}),
+        z_by_side={"right": None, "left": None},
+    )
+    assert missing["kidney_right_psoas_thickness_mm"] is None
 
 
 def test_kidney_thirds_rotation_and_contrast_pedicle():

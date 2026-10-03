@@ -56,7 +56,7 @@ def extract_anatomy_features(
     features.update(measure_abdomen(volume, _as_float(spine.get("l3_l4_z"))))
     features.update(body_mask_fields(volume, features))
     features.update(assign_clinical_body_size(features))
-    features.update(measure_psoas(volume, _as_float(spine.get("vertebrae_L3_z"))))
+    features.update(measure_psoas(volume, z_by_side=_kidney_mid_z(volume)))
     features.update(measure_kidney_distances(volume))
     features.update(measure_perirenal(volume))
     features.update(measure_kidney_shape(volume))
@@ -156,6 +156,15 @@ def load_anatomy_volume(seg_dir: Path, hu_nifti: Optional[Path] = None) -> Optio
     if affine is None:
         return None
     return AnatomyVolume(affine=affine, masks=masks, hu=hu)
+
+
+def _kidney_mid_z(volume: AnatomyVolume) -> Dict[str, Optional[float]]:
+    """Cranio-caudal midpoint of each kidney. Missing kidney → no psoas slice."""
+    levels: Dict[str, Optional[float]] = {}
+    for side in ("left", "right"):
+        center = volume.centroid(f"kidney_{side}")
+        levels[side] = None if center is None else float(center[2])
+    return levels
 
 
 def _as_float(value: object) -> Optional[float]:
