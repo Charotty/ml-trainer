@@ -1,0 +1,11 @@
+{
+  "model_kind": "rf",
+  "estimator_profile": "production",
+  "enrichment_mode": "na_trends",
+  "yz_target_boost": false,
+  "yz_boost_mode": "off",
+  "add_missing_indicators": true,
+  "encode_categoricals": true,
+  "selected_from": "2_yz_off_20261001_142516",
+  "note": "Accepted Variant A configuration: random forest, no Y/Z sample-weight boost."
+}
