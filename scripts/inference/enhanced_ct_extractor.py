@@ -1057,8 +1057,8 @@ def extract_features_from_dicom_folder(
     spine_center_x_mm = _median(spine_acc['spine_center_x_mm'])
     spine_center_y_mm = _median(spine_acc['spine_center_y_mm'])
     spine_center_z_mm = _median(spine_acc.get('spine_center_z_mm', []))
-    if spine_center_z_mm is None:
-        spine_center_z_mm = body_com_z_mm
+    # A missing vertebra must stay missing. The torso centre sits ~200 mm
+    # caudal of the kidney and was being subtracted as if it were the vertebra.
 
     kidney_features = _run_kidney_extraction(
         dicom_folder,

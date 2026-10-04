@@ -21,6 +21,7 @@ from src.features.ct_anatomy.psoas import measure_psoas
 from src.features.ct_anatomy.qc import QC_MANUAL, QC_OUT_OF_RANGE, body_type_from_bmi, finalize_qc
 from src.features.ct_anatomy.segmentation import run_anatomy_segmentation
 from src.features.ct_anatomy.spine import measure_spine
+from src.features.ct_anatomy.vertebral_frame import measure_vertebral_frame, publish_vertebral_frame
 from src.features.ct_anatomy.volume import AnatomyVolume
 from scripts.validation.validate_extractor_anatomy import agreement_row, compare_tables
 
@@ -327,6 +328,43 @@ def test_kidney_thirds_rotation_and_contrast_pedicle():
     dark = measure_kidney_shape(_volume(shape, {"kidney_left": kidney, "aorta": aorta}, hu=np.zeros(shape)))
     assert dark["kidney_left_pedicle_status"] == "no_contrast"
     assert dark["kidney_left_pedicle_length_mm"] is None
+
+
+def test_vertebral_frame_uses_the_body_at_the_kidney_not_a_side_bone():
+    shape = (80, 40, 50)
+    kidney = np.zeros(shape, dtype=bool)
+    body = np.zeros(shape, dtype=bool)
+    process = np.zeros(shape, dtype=bool)
+    kidney[60:70, 20:30, 10:40] = True
+    body[40:50, 20:30, 10:40] = True
+    process[5:15, 20:30, 10:40] = True
+    measured = measure_vertebral_frame(
+        _volume(shape, {"kidney_left": kidney, "vertebrae_body": body, "vertebrae_L3": process})
+    )
+    assert measured["kidney_left_middle_x_vert"] == pytest.approx(20.0, abs=0.6)
+    assert measured["kidney_left_middle_y_vert"] == pytest.approx(0.0, abs=0.6)
+    assert measured["kidney_left_middle_z_vert"] == pytest.approx(0.0, abs=1.0)
+    assert measured["vert_origin_x"] == pytest.approx(44.5, abs=0.6)
+
+
+def test_skin_size_replaces_the_cropped_body_median():
+    published = publish_vertebral_frame(
+        {
+            "vert_origin_x": 10.0,
+            "vert_origin_y": 20.0,
+            "vert_origin_z": 30.0,
+            "body_width_mm": 320.0,
+            "body_depth_mm": 210.0,
+            "body_width_mm_median": 110.0,
+            "body_depth_mm_median": 95.0,
+            "body_size_source": "body_mask_l3l4",
+        }
+    )
+    assert published["spine_center_z_mm"] == pytest.approx(30.0)
+    assert published["spine_center_source"] == "vertebral_body_at_kidney"
+    assert published["body_width_mm_median"] == pytest.approx(320.0)
+    assert published["body_depth_mm_median"] == pytest.approx(210.0)
+    assert publish_vertebral_frame({"body_width_mm": 110.0, "body_depth_mm": 90.0}) == {}
 
 
 def test_manual_fields_are_not_invented():

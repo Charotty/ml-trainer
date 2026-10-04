@@ -97,6 +97,7 @@ from src.features.ct_anatomy import (  # noqa: E402
 )
 from src.features.ct_anatomy.abdomen import assign_clinical_body_size  # noqa: E402
 from src.features.ct_anatomy.extract import body_mask_fields_from_seg_dir  # noqa: E402
+from src.features.ct_anatomy.vertebral_frame import publish_vertebral_frame  # noqa: E402
 from src.features.ct_anatomy.segmentation import run_body_task  # noqa: E402
 from src.features.ct_anatomy.profiles import PROFILE_FAST, PROFILE_FULL  # noqa: E402
 
@@ -481,6 +482,7 @@ def _process_case_inner(
     if seg_dir is not None and prep.nifti_file is not None:
         row.update(body_mask_fields_from_seg_dir(seg_dir, prep.nifti_file, row))
     row.update(assign_clinical_body_size(row))
+    row.update(publish_vertebral_frame(row))
 
     return row
 
