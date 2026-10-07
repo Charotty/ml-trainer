@@ -62,12 +62,18 @@ def default_totalsegmentator_runner(
     def _call(options: Dict[str, Any]) -> None:
         try:
             totalsegmentator(**options)
+        except SystemExit as exc:
+            # Licensed tasks such as vertebrae_body call sys.exit instead of raising.
+            raise RuntimeError(f"TotalSegmentator exited ({exc.code})") from exc
         except TypeError:
             fallback = dict(options)
             fallback.pop("roi_subset", None)
             if task == "total":
                 fallback.pop("task", None)
-            totalsegmentator(**fallback)
+            try:
+                totalsegmentator(**fallback)
+            except SystemExit as exc:
+                raise RuntimeError(f"TotalSegmentator exited ({exc.code})") from exc
 
     try:
         print(f"  TotalSegmentator task={task} fast={fast} device={dev}")
@@ -144,19 +150,23 @@ def run_anatomy_segmentation(
     call = runner or default_totalsegmentator_runner
     nifti_path = Path(nifti_path)
 
+    # vertebrae_body cannot use --fast and its 1.5 mm model is enough to trip
+    # the WSL GPU driver. The 3 mm tasks stay on the requested device.
+    cpu_tasks = {"vertebrae_body"}
     for task, roi_subset, fast in FULL_TASKS:
         out = seg_dir / task
         status_key = f"anatomy_seg_status_{task}"
         if reuse and _has_mask_files(out):
             row[status_key] = "cached"
             continue
+        task_device = "cpu" if task in cpu_tasks and device != "cpu" else device
         ok = call(
             input_path=nifti_path,
             output=out,
             task=task,
             roi_subset=roi_subset,
             fast=fast,
-            device=device,
+            device=task_device,
         )
         row[status_key] = "ok" if ok else "failed"
     return row

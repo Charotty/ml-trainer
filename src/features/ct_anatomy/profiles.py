@@ -48,11 +48,16 @@ TOTAL_ROI: Tuple[str, ...] = (
 TaskSpec = Tuple[str, Optional[Sequence[str]], bool]
 
 FULL_TASKS: Tuple[TaskSpec, ...] = (
-    ("total", TOTAL_ROI, False),
+    # 3 mm total: the 1.5 mm model crashes the WSL GPU driver on an 8 GB card.
+    ("total", TOTAL_ROI, True),
     ("body", None, True),
+    # vertebrae_body rejects --fast; it runs on CPU (see segmentation.py).
+    # trunk_cavities and abdominal_muscles are omitted: the full-resolution
+    # models do not fit in WSL (GPU driver crash or the 15 GB RAM cap) and
+    # this TotalSegmentator build refuses --fast for both.
     ("vertebrae_body", None, False),
-    ("trunk_cavities", None, True),
-    ("abdominal_muscles", None, True),
+    # ("trunk_cavities", None, False),
+    # ("abdominal_muscles", None, False),
 )
 
 VERTEBRA_LEVELS: Tuple[str, ...] = ("L1", "L2", "L3", "L4", "L5", "S1")

@@ -9,6 +9,10 @@ the study to the vertebral body and writes:
 The origin is the vertebral body on the axial slice through the kidneys, not
 the centre of the whole torso and not a rib or pelvic bone nearest the skin.
 No constant is added: a remaining shift has to show up in the next comparison.
+
+``measure_lyashchenko`` adds the protocol from Lyashchenko, Demin and Urazov:
+OY through the spinous process, OX through the posterior point of the canal,
+four origin/point variants, and fat, psoas and spine gap on that same slice.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import numpy as np
 from src.features.ct_anatomy.distances import _vertebral_body_slice
 from src.features.ct_anatomy.kidney_shape import _thirds
 from src.features.ct_anatomy.qc import QC_MISSING
+from src.features.ct_anatomy.vertebral_axes import measure_lyashchenko
 from src.features.ct_anatomy.volume import AnatomyVolume
 
 # Same limits as the clinical body-size sanitizer. A cropped HU blob must not
@@ -84,6 +89,7 @@ def measure_vertebral_frame(volume: AnatomyVolume) -> Dict[str, object]:
                 delta = float(point[axis] - origin[axis])
                 out[key] = delta if signed else abs(delta)
                 out[f"{key}_qc"] = origin_qc
+    out.update(measure_lyashchenko(volume))
     return out
 
 
