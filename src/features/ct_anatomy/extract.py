@@ -16,6 +16,7 @@ from src.features.ct_anatomy.profiles import MASK_FILES
 from src.features.ct_anatomy.psoas import measure_psoas
 from src.features.ct_anatomy.qc import QC_MANUAL, body_type_from_bmi, finalize_qc
 from src.features.ct_anatomy.spine import measure_spine
+from src.features.ct_anatomy.vertebral_frame import measure_vertebral_frame
 from src.features.ct_anatomy.volume import AnatomyVolume
 
 MANUAL_FIELDS = ("diagnosis", "pathology_site", "has_previous_surgery")
@@ -60,6 +61,7 @@ def extract_anatomy_features(
     features.update(measure_kidney_distances(volume))
     features.update(measure_perirenal(volume))
     features.update(measure_kidney_shape(volume))
+    features.update(measure_vertebral_frame(volume))
     features.update(_manual_placeholders())
     features["anatomy_feature_schema"] = "ct_anatomy_v1"
     if apply_ranges:

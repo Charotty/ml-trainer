@@ -21,6 +21,8 @@ from src.features.ct_anatomy.psoas import measure_psoas
 from src.features.ct_anatomy.qc import QC_MANUAL, QC_OUT_OF_RANGE, body_type_from_bmi, finalize_qc
 from src.features.ct_anatomy.segmentation import run_anatomy_segmentation
 from src.features.ct_anatomy.spine import measure_spine
+from src.features.ct_anatomy.vertebral_axes import score_variant_pairs
+from src.features.ct_anatomy.vertebral_frame import measure_vertebral_frame, publish_vertebral_frame
 from src.features.ct_anatomy.volume import AnatomyVolume
 from scripts.validation.validate_extractor_anatomy import agreement_row, compare_tables
 
@@ -329,6 +331,43 @@ def test_kidney_thirds_rotation_and_contrast_pedicle():
     assert dark["kidney_left_pedicle_length_mm"] is None
 
 
+def test_vertebral_frame_uses_the_body_at_the_kidney_not_a_side_bone():
+    shape = (80, 40, 50)
+    kidney = np.zeros(shape, dtype=bool)
+    body = np.zeros(shape, dtype=bool)
+    process = np.zeros(shape, dtype=bool)
+    kidney[60:70, 20:30, 10:40] = True
+    body[40:50, 20:30, 10:40] = True
+    process[5:15, 20:30, 10:40] = True
+    measured = measure_vertebral_frame(
+        _volume(shape, {"kidney_left": kidney, "vertebrae_body": body, "vertebrae_L3": process})
+    )
+    assert measured["kidney_left_middle_x_vert"] == pytest.approx(20.0, abs=0.6)
+    assert measured["kidney_left_middle_y_vert"] == pytest.approx(0.0, abs=0.6)
+    assert measured["kidney_left_middle_z_vert"] == pytest.approx(0.0, abs=1.0)
+    assert measured["vert_origin_x"] == pytest.approx(44.5, abs=0.6)
+
+
+def test_skin_size_replaces_the_cropped_body_median():
+    published = publish_vertebral_frame(
+        {
+            "vert_origin_x": 10.0,
+            "vert_origin_y": 20.0,
+            "vert_origin_z": 30.0,
+            "body_width_mm": 320.0,
+            "body_depth_mm": 210.0,
+            "body_width_mm_median": 110.0,
+            "body_depth_mm_median": 95.0,
+            "body_size_source": "body_mask_l3l4",
+        }
+    )
+    assert published["spine_center_z_mm"] == pytest.approx(30.0)
+    assert published["spine_center_source"] == "vertebral_body_at_kidney"
+    assert published["body_width_mm_median"] == pytest.approx(320.0)
+    assert published["body_depth_mm_median"] == pytest.approx(210.0)
+    assert publish_vertebral_frame({"body_width_mm": 110.0, "body_depth_mm": 90.0}) == {}
+
+
 def test_manual_fields_are_not_invented():
     shape = (8, 8, 8)
     kidney = np.zeros(shape, dtype=bool)
@@ -399,3 +438,93 @@ def test_agreement_metrics_and_unpaired_report():
     report = compare_tables(workbook, extracted=None)
     assert report.loc[0, "status"] == "no_extraction"
     assert int(report.loc[0, "n_manual"]) == 1
+
+
+def _box(shape, x0, x1, y0, y1, z0, z1):
+    mask = np.zeros(shape, dtype=bool)
+    mask[x0:x1, y0:y1, z0:z1] = True
+    return mask
+
+
+def test_lyashchenko_axes_follow_a_rotated_vertebra():
+    """On the side, scanner X is the front-back axis. Lateral distance follows the vertebra."""
+    shape = (80, 80, 40)
+    body = _box(shape, 18, 28, 36, 46, 18, 24)
+    arch = _box(shape, 34, 44, 38, 44, 19, 23)
+    kidney = _box(shape, 8, 16, 18, 28, 10, 34)
+    psoas = _box(shape, 30, 50, 20, 24, 18, 24)
+    hu = np.zeros(shape, dtype=float)
+    hu[17:25, 18:28, 18:24] = -80.0
+    measured = measure_vertebral_frame(
+        _volume(
+            shape,
+            {
+                "kidney_left": kidney,
+                "vertebrae_body": body,
+                "vertebrae_L2": body | arch,
+                "iliopsoas_left": psoas,
+            },
+            hu=hu,
+        )
+    )
+    # Scanner X difference is the front-back gap, about 11 mm. The sheet's X is lateral.
+    assert measured["kidney_left_middle_x_vert"] == pytest.approx(11.0, abs=2.0)
+    assert measured["kidney_left_middle_x_body_com"] == pytest.approx(18.0, abs=2.5)
+    assert measured["kidney_left_middle_x_body_com"] > measured["kidney_left_middle_x_vert"] + 4.0
+    assert measured["kidney_left_middle_y_canal_com"] > measured["kidney_left_middle_y_body_com"] + 8.0
+    assert measured["kidney_left_middle_x_body_near"] < measured["kidney_left_middle_x_body_com"] - 3.0
+    assert measured["kidney_left_middle_vert_level"] == "L2"
+    assert measured["kidney_left_perirenal_dorsal_vert_mm"] > 4.0
+    assert measured["kidney_left_perirenal_ventral_vert_mm"] == pytest.approx(0.0, abs=0.1)
+    assert measured["kidney_left_psoas_thickness_vert_mm"] > 15.0
+    assert measured["kidney_left_medial_to_spine_vert_mm"] > 0.0
+
+
+def test_z_is_a_projection_onto_named_vertebrae():
+    shape = (40, 40, 50)
+    low = _box(shape, 16, 24, 16, 24, 8, 14)
+    high = _box(shape, 16, 24, 16, 24, 28, 34)
+    arch_low = _box(shape, 18, 22, 26, 32, 9, 13)
+    arch_high = _box(shape, 18, 22, 26, 32, 29, 33)
+    kidney = _box(shape, 28, 34, 10, 16, 6, 40)
+    measured = measure_vertebral_frame(
+        _volume(
+            shape,
+            {
+                "kidney_left": kidney,
+                "vertebrae_body": low | high,
+                "vertebrae_L3": low | arch_low,
+                "vertebrae_L2": high | arch_high,
+            },
+        )
+    )
+    assert measured["kidney_left_lower_vert_level"] == "L3"
+    assert measured["kidney_left_upper_vert_level"] == "L2"
+    assert measured["kidney_left_lower_z_from_l3"] < measured["kidney_left_upper_z_from_l3"]
+    assert measured["kidney_left_upper_z_from_l2"] == pytest.approx(0.0, abs=8.0)
+
+
+def test_variant_score_keeps_the_definition_that_matches_the_sheet():
+    excel = {
+        "right_supine_middle_x": 20.0,
+        "right_supine_middle_y": 30.0,
+        "right_supine_middle_z": -40.0,
+    }
+    ct = {
+        "kidney_right_middle_x_body_com": 21.0,
+        "kidney_right_middle_y_body_com": 29.0,
+        "kidney_right_middle_z_body_com": 1.0,
+        "kidney_right_middle_x_canal_near": 8.0,
+        "kidney_right_middle_y_canal_near": 4.0,
+        "kidney_right_middle_z_canal_near": 1.0,
+        "kidney_right_middle_z_from_l2": -41.0,
+    }
+    # The other thirds and the left side stay empty, so only the filled cells count.
+    scored = score_variant_pairs([(excel, ct)], "supine")
+    by_key = {(row["variant"], row["axis"], row["third"]): row for row in scored}
+    body = by_key[("body_com", "x", "middle")]
+    canal = by_key[("canal_near", "x", "middle")]
+    assert body["mae"] < canal["mae"]
+    local_z = by_key[("body_com", "z", "middle")]
+    level_z = by_key[("centroid_from_l2", "z", "middle")]
+    assert level_z["mae"] < local_z["mae"]

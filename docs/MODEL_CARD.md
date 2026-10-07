@@ -13,7 +13,25 @@ Do not cite README tables, `MODEL_TECHNICAL_DOCUMENTATION.md` MAE 2.14 mm, or hi
 
 Cards: `models/archive/*_f111_*.json` and `models/archive/*_f121_*.json`.
 
-The mutable alias `models/adaptive_ensemble_clinical_honest.pkl` is **not** a release identifier. The working alias currently loads the **111-feature** file; the git-tracked archive binary is **121 features**. Both stay `research_only: true`.
+The mutable alias `models/adaptive_ensemble_clinical_honest.pkl` is **not** a release identifier. As of 2026-10-03 the working alias is the Variant A selection below. Older archive binaries stay `research_only: true`.
+
+## Variant A working alias (2026-10-03)
+
+Selected on repeated nested GroupKFold, seeds 0, 1 and 2. Training used `Смещение - конечное -13 .xlsx` with the five holdout patients removed (Вегерин, Залесская, Сомова, Шилова, Кремас). Config: `config/variant_a_selected.json`.
+
+| | |
+|---|---|
+| Model | random forest, one model per axis, Y/Z sample-weight boost off |
+| Patients | 120 (102 both kidneys, 18 one kidney) |
+| Features | 129 |
+| Repeated-CV MAE | 7.31 mm (95% CI 6.73–8.01) |
+| MAE X / Y / Z | 5.28 / 6.44 / 10.20 mm |
+| 3D mean error | 15.10 mm; 30% of kidneys within 10 mm |
+| R² | 0.055 |
+| Holdout trio (xlsx features) | 7.27 mm — Кремас, Сомова, Вегерин |
+| Journal row | stage 2 `2_yz_off`, refit recorded as stage 9 |
+
+This alias is the file the workbench loads. It is **not** `production_winner`. [`MODEL_RELEASE_GATES.md`](MODEL_RELEASE_GATES.md) is unchanged: promotion is still blocked. Z error stays about 10 mm; later Variant A stages did not beat this forest by the 0.2 mm rule.
 
 ## Metrics policy
 

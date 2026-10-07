@@ -186,6 +186,11 @@ def main() -> int:
         default=None,
         help="Optional JSON with AdaptiveEnsembleTrainer kwargs (Variant A)",
     )
+    parser.add_argument(
+        "--skip-oof",
+        action="store_true",
+        help="Skip nested OOF after the final fit (use when CV is already in the journal)",
+    )
     args = parser.parse_args()
     z_head = args.z_head
     model_path = args.model_path or (
@@ -256,7 +261,8 @@ def main() -> int:
         cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
         if not isinstance(cfg, dict):
             raise ValueError("--config must be a JSON object")
-        trainer_kwargs.update({k: v for k, v in cfg.items() if k != "na_trend_store"})
+        skip_keys = {"na_trend_store", "selected_from", "note"}
+        trainer_kwargs.update({k: v for k, v in cfg.items() if k not in skip_keys})
     trainer = AdaptiveEnsembleTrainer(**trainer_kwargs)
     prepared = trainer.prepare_training_data_fit(df)
     if prepared[0] is None:
@@ -301,6 +307,9 @@ def main() -> int:
                 "oof_protocol": "nested_groupkfold",
                 "calibrators": "oof_gated_supine_only",
                 "z_head": z_head,
+                "model_kind": trainer.model_kind,
+                "yz_boost_mode": getattr(trainer, "yz_boost_mode", None),
+                "variant_a_config": str(args.config) if args.config else None,
             },
         },
     )
@@ -311,7 +320,17 @@ def main() -> int:
     joblib.dump(payload, model_path)
     print(f"[OK] saved {model_path}")
 
-    oof_report = evaluate_groupkfold_oof(df, z_head=z_head, na_trend_store=na_trends)
+    if args.skip_oof:
+        print("[oof] skipped; repeated nested CV is already in docs/EXPERIMENTS_VARIANT_A.md")
+        oof_report = {
+            "skipped": True,
+            "oof_status": "not_computed",
+            "reason": "repeated nested CV already journalled for this configuration",
+            "journal": "docs/EXPERIMENTS_VARIANT_A.md",
+            "cv_run_id": "2_yz_off_20261001_142516",
+        }
+    else:
+        oof_report = evaluate_groupkfold_oof(df, z_head=z_head, na_trend_store=na_trends)
     oof_metrics = {
         k: oof_report[k]
         for k in (
