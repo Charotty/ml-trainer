@@ -66,6 +66,22 @@ input[type="file"] {
   color: var(--text);
 }
 
+.checkbox-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  max-width: 42rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+  margin-bottom: 0.85rem;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: auto;
+  margin-top: 0.3rem;
+  flex-shrink: 0;
+}
+
 button {
   background: var(--accent);
   color: #fff;
@@ -247,6 +263,21 @@ button.secondary:hover:not(:disabled) {
 }
 
 .qa-grid input.invalid { border-color: #c0392b; }
+
+.qa-grid select {
+  width: 100%;
+  margin-top: 0.2rem;
+}
+
+.pred-warnings {
+  margin-top: 0.5rem;
+  color: #c0392b;
+  font-size: 0.85rem;
+}
+
+tr.withheld td { color: var(--muted); font-style: italic; }
+
+label.manual-override select { border-color: var(--z-highlight); }
 
 /* UI-P2-06: подсветка полей, изменённых вручную */
 label.manual-override .qa-label { color: var(--z-highlight); }

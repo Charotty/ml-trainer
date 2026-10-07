@@ -37,9 +37,8 @@ from sklearn.model_selection import GroupKFold
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "models" / "phase1"))
 
-from adaptive_ensemble import AdaptiveEnsembleTrainer  # noqa: E402
+from src.models.ensemble import AdaptiveEnsembleTrainer  # noqa: E402
 from src.data.xlsx_displacement_parser import build_vybor_from_xlsx  # noqa: E402
 from src.features.ct_external_enrichment import enrich_external_ct_frame  # noqa: E402
 from src.features.phase1_schema import TARGET_NAMES, normalize_dataframe  # noqa: E402

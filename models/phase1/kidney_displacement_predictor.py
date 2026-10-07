@@ -20,7 +20,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 from src.features.phase1_schema import BASE_FEATURES, TARGET_NAMES
 
 # Import our best ensemble
-from adaptive_ensemble import AdaptiveEnsembleTrainer
+from src.models.ensemble import AdaptiveEnsembleTrainer
 
 @dataclass
 class PredictionResult:

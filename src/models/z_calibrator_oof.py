@@ -128,11 +128,21 @@ class SideZCalibrator:
     ) -> "SideZCalibrator":
         raw = np.asarray(raw_pred, dtype=float).reshape(-1)
         y = np.asarray(y_true, dtype=float).reshape(-1)
-        span, lordosis, z_rel = _clinical_z_arrays(df, side=self.side)
-        self.train_mae_before_ = float(mean_absolute_error(y, raw))
-        self.params = _grid_search(raw, span, lordosis, z_rel, y, self.clip_mm)
-        calibrated = _apply_span_lordosis(raw, span, lordosis, z_rel, self.params)
-        self.train_mae_after_ = float(mean_absolute_error(y, calibrated))
+        mask = np.isfinite(raw) & np.isfinite(y)
+        if int(mask.sum()) < 2:
+            self.params = SpanLordosisParams(clip_mm=self.clip_mm)
+            self.train_mae_before_ = float("nan")
+            self.train_mae_after_ = float("nan")
+            self.fitted_ = True
+            return self
+        df_f = df.iloc[np.where(mask)[0]].reset_index(drop=True)
+        raw_f = raw[mask]
+        y_f = y[mask]
+        span, lordosis, z_rel = _clinical_z_arrays(df_f, side=self.side)
+        self.train_mae_before_ = float(mean_absolute_error(y_f, raw_f))
+        self.params = _grid_search(raw_f, span, lordosis, z_rel, y_f, self.clip_mm)
+        calibrated = _apply_span_lordosis(raw_f, span, lordosis, z_rel, self.params)
+        self.train_mae_after_ = float(mean_absolute_error(y_f, calibrated))
         self.fitted_ = True
         return self
 
@@ -173,6 +183,13 @@ def fit_calibrator_oof_gated(
     raw = np.asarray(raw_pred, dtype=float).reshape(-1)
     y = np.asarray(y_true, dtype=float).reshape(-1)
     groups_arr = np.asarray(groups)
+    mask = np.isfinite(raw) & np.isfinite(y)
+    if int(mask.sum()) < 2:
+        return None
+    df = df.iloc[np.where(mask)[0]].reset_index(drop=True)
+    raw = raw[mask]
+    y = y[mask]
+    groups_arr = groups_arr[mask]
     n_splits = min(n_splits, len(np.unique(groups_arr)))
     if n_splits < 2:
         calibrator.fit(df, raw, y)
@@ -191,7 +208,7 @@ def fit_calibrator_oof_gated(
         oof_raw[val_idx] = raw[val_idx]
         oof_cal[val_idx] = fold_cal.transform(df.iloc[val_idx], raw[val_idx])
 
-    valid = np.isfinite(oof_raw) & np.isfinite(oof_cal)
+    valid = np.isfinite(oof_raw) & np.isfinite(oof_cal) & np.isfinite(y)
     if not np.any(valid):
         return None
     mae_before = float(mean_absolute_error(y[valid], oof_raw[valid]))

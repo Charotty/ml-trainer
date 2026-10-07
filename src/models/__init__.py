@@ -1,6 +1,10 @@
 """
 ML models module for kidney displacement prediction.
 
-This module contains all machine learning models including
-baselines, random forest, XGBoost, and ensemble models.
+Production: ``src.models.ensemble``, ``src.models.runtime``, nested CV, manifests.
+Experimental: ``train_xgboost``, ``train_random_forest``, ``unet3d``.
+Legacy: ``models/phase1`` shims, span-anchor left/right wrappers.
 """
+
+PACKAGE_STATUS = "mixed"
+

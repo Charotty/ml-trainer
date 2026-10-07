@@ -70,7 +70,7 @@ def eval_model(name: str, path: Path, val_df: pd.DataFrame) -> dict:
     q_cov = {}
     quantile = getattr(bundle, "quantile_model", None)
     if quantile is not None and getattr(quantile, "fitted_", False):
-        from adaptive_ensemble import AdaptiveEnsembleTrainer
+        from src.models.ensemble import AdaptiveEnsembleTrainer
         from src.features.pipeline import apply_model_preprocessing, build_inference_matrix
 
         trainer = AdaptiveEnsembleTrainer()

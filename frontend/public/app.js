@@ -19,10 +19,32 @@ const QA_LABELS = {
   body_area_mm2: { label: "Площадь сечения тела", unit: "мм²" },
   kidney_left_volume_cm3: { label: "Объём левой почки", unit: "см³" },
   kidney_right_volume_cm3: { label: "Объём правой почки", unit: "см³" },
+  bmi: { label: "ИМТ", unit: "кг/м²" },
+  body_type: { label: "Тип телосложения (0 норма, 1 астеник, 2 гиперстеник)", unit: "" },
+  has_previous_surgery: { label: "Предыдущие операции (0/1)", unit: "" },
+  lumbar_lordosis_deg: { label: "Поясничный лордоз", unit: "°" },
+  s1_plate_tilt_deg: { label: "Наклон площадки S1", unit: "°" },
+  abd_wall_thickness_mm: { label: "Толщина брюшной стенки", unit: "мм" },
+  kidney_left_z_span_supine_mm: { label: "Левая почка, Z-пролёт на спине", unit: "мм" },
+  kidney_right_z_span_supine_mm: { label: "Правая почка, Z-пролёт на спине", unit: "мм" },
+  kidney_left_y_span_supine_mm: { label: "Левая почка, Y-пролёт на спине", unit: "мм" },
+  kidney_right_y_span_supine_mm: { label: "Правая почка, Y-пролёт на спине", unit: "мм" },
+  kidney_left_present: { label: "Левая почка", unit: "", kind: "laterality" },
+  kidney_right_present: { label: "Правая почка", unit: "", kind: "laterality" },
 };
+
+const LATERALITY_OPTIONS = [
+  { value: "present", label: "есть" },
+  { value: "absent", label: "нет (нефрэктомия / не существует)" },
+  { value: "not_assessed", label: "не подтверждена" },
+];
 
 // UI-P1-06: группировка полей QA по анатомическим секциям
 const QA_GROUPS = [
+  {
+    title: "Латеральность",
+    fields: ["kidney_left_present", "kidney_right_present"],
+  },
   {
     title: "Левая почка",
     fields: ["kidney_left_center_x_rel", "kidney_left_center_y_rel", "kidney_left_center_z_rel"],
@@ -35,6 +57,22 @@ const QA_GROUPS = [
   { title: "Центр масс тела", fields: ["body_com_x", "body_com_y", "body_com_z"] },
   { title: "Размеры тела", fields: ["body_width_mm", "body_depth_mm", "body_area_mm2"] },
   { title: "Объёмы", fields: ["kidney_left_volume_cm3", "kidney_right_volume_cm3"] },
+  {
+    title: "Клиника",
+    fields: ["bmi", "body_type", "has_previous_surgery"],
+  },
+  {
+    title: "Ось / пролёты",
+    fields: [
+      "lumbar_lordosis_deg",
+      "s1_plate_tilt_deg",
+      "abd_wall_thickness_mm",
+      "kidney_left_z_span_supine_mm",
+      "kidney_right_z_span_supine_mm",
+      "kidney_left_y_span_supine_mm",
+      "kidney_right_y_span_supine_mm",
+    ],
+  },
 ];
 
 // UI-P2-02: русские подписи таргетов прогноза
@@ -284,18 +322,31 @@ function buildQaForm(base = {}, manualFields = new Set()) {
       const tech = document.createElement("span");
       tech.className = "qa-tech";
       tech.textContent = name;
-      const input = document.createElement("input");
-      input.type = "number";
-      input.step = "any";
-      input.name = name;
-      const value = base[name] ?? "";
-      input.value = value;
-      qaBaseline[name] = String(value);
-      // TD-06: подсветка невалидных значений
-      input.oninput = () => {
-        input.classList.toggle("invalid", input.value !== "" && !Number.isFinite(parseFloat(input.value)));
-      };
-      // UI-P2-06: подсветка полей, изменённых вручную
+      let input;
+      if (meta.kind === "laterality") {
+        input = document.createElement("select");
+        input.name = name;
+        LATERALITY_OPTIONS.forEach((opt) => {
+          const option = document.createElement("option");
+          option.value = opt.value;
+          option.textContent = opt.label;
+          input.appendChild(option);
+        });
+        const value = base[name] || "not_assessed";
+        input.value = value;
+        qaBaseline[name] = String(value);
+      } else {
+        input = document.createElement("input");
+        input.type = "number";
+        input.step = "any";
+        input.name = name;
+        const value = base[name] ?? "";
+        input.value = value;
+        qaBaseline[name] = String(value);
+        input.oninput = () => {
+          input.classList.toggle("invalid", input.value !== "" && !Number.isFinite(parseFloat(input.value)));
+        };
+      }
       if (manualFields.has(name)) label.classList.add("manual-override");
       label.appendChild(span);
       label.appendChild(tech);
@@ -311,8 +362,12 @@ function buildQaForm(base = {}, manualFields = new Set()) {
 // TD-05: отправляем только изменённые поля
 function readQaOverrides() {
   const overrides = {};
-  el("qaForm").querySelectorAll("input[name]").forEach((input) => {
+  el("qaForm").querySelectorAll("input[name], select[name]").forEach((input) => {
     if (input.value === "" || input.value === qaBaseline[input.name]) return;
+    if (input.tagName === "SELECT") {
+      overrides[input.name] = input.value;
+      return;
+    }
     const num = parseFloat(input.value);
     if (Number.isFinite(num)) overrides[input.name] = num;
   });
@@ -350,7 +405,7 @@ function showCoverage(coveragePct, missing) {
 // Прогноз (UI-P2-02)
 // ---------------------------------------------------------------------------
 
-function showPredictions(predictions) {
+function showPredictions(predictions, meta = {}) {
   const table = el("predTable");
   const tbody = table.querySelector("tbody");
   tbody.innerHTML = "";
@@ -361,13 +416,40 @@ function showPredictions(predictions) {
     name.textContent = PRED_LABELS[key] || key;
     name.title = key;
     const value = document.createElement("td");
-    const num = Number(val);
-    value.textContent = Number.isFinite(num) ? num.toFixed(2) : "н/д";
+    if (val === null || val === undefined) {
+      value.textContent = "нет почки";
+      tr.classList.add("withheld");
+    } else {
+      const num = Number(val);
+      value.textContent = Number.isFinite(num) ? num.toFixed(2) : "н/д";
+    }
     tr.appendChild(name);
     tr.appendChild(value);
     tbody.appendChild(tr);
   });
   table.classList.remove("hidden");
+  let warn = el("predWarnings");
+  if (!warn) {
+    warn = document.createElement("ul");
+    warn.id = "predWarnings";
+    warn.className = "pred-warnings";
+    table.after(warn);
+  }
+  warn.innerHTML = "";
+  const notes = [...(meta.warnings || [])];
+  if (meta.laterality) {
+    Object.entries(meta.laterality).forEach(([side, status]) => {
+      if (status && status !== "present") {
+        notes.unshift(`${side}: ${status}`);
+      }
+    });
+  }
+  notes.forEach((text) => {
+    const li = document.createElement("li");
+    li.textContent = text;
+    warn.appendChild(li);
+  });
+  warn.classList.toggle("hidden", notes.length === 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -454,7 +536,7 @@ async function loadPrediction() {
   try {
     const pred = await api(`/${caseId}/prediction`);
     if (pred && pred.predictions) {
-      showPredictions(pred.predictions);
+      showPredictions(pred.predictions, pred);
       updateReportPreview(pred.predictions);
       el("btnReport").disabled = false;
       el("btnReportPdf").disabled = false;
@@ -568,7 +650,8 @@ el("btnAnalyze").onclick = () =>
     "Запуск…",
     async () => {
       if (!modelLoaded) throw new Error("Модель не загружена — анализ недоступен");
-      await api(`/${caseId}/analyze`, { method: "POST" });
+      const fast = Boolean(el("analyzeFast") && el("analyzeFast").checked);
+      await api(`/${caseId}/analyze?fast=${fast ? "true" : "false"}`, { method: "POST" });
       setStatus("extracting");
       el("progress").classList.remove("hidden");
       showStep("analyze");
@@ -606,7 +689,7 @@ el("btnPredict").onclick = () =>
     if (!modelLoaded) throw new Error("Модель не загружена — прогноз недоступен");
     const res = await api(`/${caseId}/predict`, { method: "POST" });
     setStatus("predicted");
-    showPredictions(res.predictions);
+    showPredictions(res.predictions, res);
     updateReportPreview(res.predictions);
     showToast("Прогноз рассчитан");
   });

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Proxy-weighted training: Vybor clinical + KiTS19 proxy δ + DICOM pseudo-δ.
 
-Honest evaluation is always GroupKFold OOF on clinical Vybor only (87 patients).
-Proxy rows are down-weighted via sample_weight (clinical=1.0, KiTS=0.08, DICOM=0.06).
+Production artifact is fit on proxy-weighted rows via fit_final().
+Evidentiary comparison vs honest is nested GroupKFold: each outer fold trains
+the teacher on clinical train only, then builds proxy rows, then scores both
+models on the same clinical validation patients.
 """
 
 from __future__ import annotations
@@ -17,16 +19,14 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "models" / "phase1"))
 sys.path.insert(0, str(ROOT / "scripts" / "data"))
 sys.path.insert(0, str(ROOT / "scripts" / "validation"))
 
-from adaptive_ensemble import AdaptiveEnsembleTrainer  # noqa: E402
+from src.models.ensemble import AdaptiveEnsembleTrainer  # noqa: E402
 import src.models.data_integration_fix as integration  # noqa: E402
 from common import compute_regression_table, predict_df  # noqa: E402
 from src.data.xlsx_displacement_parser import DEFAULT_OUTPUT_CSV  # noqa: E402
@@ -34,15 +34,12 @@ from src.features.pseudo_labeling import attach_pseudo_displacement_labels  # no
 from src.features.phase1_schema import TARGET_NAMES, normalize_dataframe  # noqa: E402
 from src.features.pipeline import apply_model_preprocessing, build_inference_matrix  # noqa: E402
 from src.models.data_integration_fix import DataIntegrationFix, LABELED_SOURCES  # noqa: E402
+from src.models.nested_cv import evaluate_nested_proxy_vs_honest  # noqa: E402
 from src.models.z_calibrator_oof import SideZCalibrator, fit_calibrator_oof_gated  # noqa: E402
 from train_clinical_honest import (  # noqa: E402
-    N_BOOTSTRAP,
     N_SPLITS,
     SEED,
     Z_TARGETS,
-    _axis_summary,
-    _bootstrap_ci,
-    evaluate_groupkfold_oof,
 )
 
 HARMONIZED_DIR = ROOT / "data" / "harmonized"
@@ -98,12 +95,13 @@ def load_teacher(vybor_path: Path | None = None) -> tuple[AdaptiveEnsembleTraine
         raise FileNotFoundError(
             f"No teacher model found. Run train_clinical_honest.py first. Tried: {TEACHER_FALLBACKS}"
         )
-    print("[teacher] no checkpoint found — training quick Vybor teacher")
+    print("[teacher] no checkpoint found — training Vybor teacher on 100% labeled rows")
     vybor = normalize_dataframe(pd.read_csv(vybor_path))
-    train_df, val_df = train_test_split(vybor, test_size=0.2, random_state=SEED)
+    vybor = vybor.dropna(subset=list(TARGET_NAMES), how="any").reset_index(drop=True)
+    name_col = "full_name" if "full_name" in vybor.columns else "case_id"
     trainer = AdaptiveEnsembleTrainer()
-    X_train, X_val, y_train, y_val = trainer.prepare_training_data_split(train_df, val_df)
-    trainer.train_and_evaluate_adaptive_ensembles(X_train, X_val, y_train, y_val)
+    X_train, y_train = trainer.prepare_training_data_fit(vybor)
+    trainer.fit_final(X_train, y_train, groups=vybor[name_col].astype(str).values)
     fallback = ROOT / "models" / "adaptive_ensemble_clinical_proxy_teacher.pkl"
     fallback.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(
@@ -176,6 +174,59 @@ def _row_group(row: pd.Series) -> str:
     return str(row.get("case_id") or row.get("universal_id") or row.name)
 
 
+def _trainer_bundle(trainer: AdaptiveEnsembleTrainer):
+    return type(
+        "Bundle",
+        (),
+        {
+            "mode": "pretrained_adaptive_ensemble",
+            "feature_names": trainer.feature_names,
+            "target_names": trainer.target_names,
+            "scaler": trainer.scaler,
+            "imputer": trainer.imputer,
+            "models": trainer.trained_models,
+            "left_z_calibrator": None,
+            "right_z_calibrator": None,
+            "z_head": getattr(trainer, "z_head", "ensemble"),
+            "z_driver_names": getattr(trainer, "z_driver_names", None),
+        },
+    )()
+
+
+def build_proxy_train_for_fold(
+    train_clinical: pd.DataFrame,
+    teacher: AdaptiveEnsembleTrainer,
+    *,
+    kits_df: pd.DataFrame | None = None,
+    dicom_df: pd.DataFrame | None = None,
+    reference_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Clinical train + proxy rows. Teacher must already exclude outer-val patients."""
+    clinical = train_clinical.copy()
+    if "sample_weight" not in clinical.columns:
+        clinical["sample_weight"] = 1.0
+    if "source" not in clinical.columns:
+        clinical["source"] = "Vybor"
+    parts = [clinical]
+    ref = reference_df if reference_df is not None else train_clinical
+    if kits_df is not None and len(kits_df):
+        kits = kits_df.copy()
+        kits["source"] = "KiTS19"
+        kits["sample_weight"] = 0.08
+        parts.append(kits)
+    if dicom_df is not None and len(dicom_df):
+        labeled = attach_pseudo_displacement_labels(
+            dicom_df.copy(),
+            _trainer_bundle(teacher),
+            predict_fn=predict_df,
+            reference_df=ref,
+        )
+        labeled["source"] = "DICOMS"
+        labeled["sample_weight"] = 0.06
+        parts.append(labeled)
+    return pd.concat(parts, ignore_index=True, sort=False)
+
+
 def _raw_z_preds(trainer: AdaptiveEnsembleTrainer, frame: pd.DataFrame, target: str) -> np.ndarray:
     X = build_inference_matrix(trainer, frame, feature_names=trainer.feature_names)
     if trainer.z_head == "quantile_v7" and target in Z_TARGETS and trainer.z_driver_names:
@@ -199,6 +250,11 @@ def main() -> int:
     parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--skip-harmonize", action="store_true")
     parser.add_argument("--skip-vybor-build", action="store_true")
+    parser.add_argument(
+        "--skip-nested-oof",
+        action="store_true",
+        help="Skip nested honest-vs-proxy OOF (slow). Do not substitute honest-only OOF.",
+    )
     args = parser.parse_args()
     run_id = f"clinical_proxy_{date.today().strftime('%Y%m%d')}"
 
@@ -226,11 +282,12 @@ def main() -> int:
 
     groups = train_df.apply(_row_group, axis=1).values
     trainer = AdaptiveEnsembleTrainer()
-    X_train, X_val, y_train, y_val = trainer.prepare_training_data_split(train_df, val_df)
+    prepared = trainer.prepare_training_data_fit(train_df)
+    if prepared[0] is None:
+        raise RuntimeError("prepare_training_data_fit failed")
+    X_train, y_train = prepared
     print(f"[train] features={len(trainer.feature_names)} sample_weight={'yes' if trainer.train_sample_weights is not None else 'no'}")
-    trainer.train_and_evaluate_adaptive_ensembles(
-        X_train, X_val, y_train, y_val, groups=groups
-    )
+    trainer.fit_final(X_train, y_train, groups=groups)
 
     clinical_all = normalize_dataframe(pd.read_csv(vybor_path))
     clinical_all = clinical_all.dropna(subset=list(TARGET_NAMES), how="any").reset_index(drop=True)
@@ -265,14 +322,46 @@ def main() -> int:
         "training_meta": {
             "mode": "proxy_weighted_extended",
             "teacher": str(teacher_path),
-            "honest_eval": "groupkfold_oof_clinical_only",
+            "honest_eval": "nested_proxy_vs_honest_same_outer_folds",
             "sample_weights": {"clinical": 1.0, "proxy_kits": 0.08, "pseudo_dicom": 0.06},
         },
     }
     joblib.dump(payload, args.model_path)
     print(f"[OK] saved {args.model_path}")
 
-    oof_metrics = evaluate_groupkfold_oof(clinical_all)
+    nested_comparison = None
+    if not args.skip_nested_oof:
+        kits_path = HARMONIZED_DIR / "kits19_medical_grade_features_aligned.csv"
+        if not kits_path.exists():
+            kits_path = ROOT / "data" / "kits19_medical_grade_features.csv"
+        kits_df = pd.read_csv(kits_path) if kits_path.exists() else None
+        dicom_path = HARMONIZED_DIR / "dicom_medical_features_aligned.csv"
+        dicom_df = pd.read_csv(dicom_path) if dicom_path.exists() else None
+
+        def trainer_factory(**kwargs):
+            params = {"enrichment_mode": "none"}
+            params.update(kwargs)
+            return AdaptiveEnsembleTrainer(**params)
+
+        def proxy_train_builder(train_clinical, fold_teacher):
+            return build_proxy_train_for_fold(
+                train_clinical,
+                fold_teacher,
+                kits_df=kits_df,
+                dicom_df=dicom_df,
+                reference_df=train_clinical,
+            )
+
+        print("[eval] nested proxy vs honest on the same outer clinical folds...")
+        nested_comparison = evaluate_nested_proxy_vs_honest(
+            clinical_all,
+            trainer_factory=trainer_factory,
+            proxy_train_builder=proxy_train_builder,
+            n_splits=N_SPLITS,
+        )
+    else:
+        print("[eval] skipped nested proxy vs honest OOF (--skip-nested-oof)")
+
     holdout_bundle = type(
         "Bundle",
         (),
@@ -304,7 +393,7 @@ def main() -> int:
         "val_rows": len(val_df),
         "train_sources": src_counts,
         "n_clinical_eval": len(clinical_all),
-        "groupkfold_oof_clinical_87": oof_metrics,
+        "nested_proxy_vs_honest": nested_comparison,
         "clinical_holdout_18_mae_mm": holdout_mae,
         "calibrators": {
             "left": left_cal.describe() if left_cal else None,

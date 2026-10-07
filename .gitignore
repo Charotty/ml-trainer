@@ -1,5 +1,8 @@
 ﻿# Virtual environment
 venv/
+.venv/
+.venv-wsl/
+env/
 
 # KITS19 dataset
 kits19/
@@ -9,11 +12,13 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
 
-# IDE files
+# IDE / editor
 .vscode/
 .idea/
 .windsurf/
+.cursor/
 
 # Logs
 logs/
@@ -23,6 +28,13 @@ logs/
 models/*.pkl
 models/*.h5
 models/*.joblib
+# Immutable candidate binaries are local provenance (large). JSON cards in
+# models/archive/ are commit-friendly and must not be gitignored.
+models/archive/*.pkl
+# Variant A experiment artifacts (pkl too large; metrics JSON stays local)
+models/experiments/*.pkl
+tools/
+results/*.log
 
 # Data files
 data/raw/
@@ -38,8 +50,10 @@ data/na_boku_full.bak.csv
 data/na_spine_full.csv
 data/vybor_from_xlsx.csv
 data/vybor_from_xlsx.manifest.json
+data/vybor_from_xlsx_baseline_pre_rework.csv
 data/*.xlsx
 data/cases/
+data/system/
 
 # Generated result artifacts
 results/_excel_*.json
@@ -47,6 +61,23 @@ results/adaptive_ensemble_*_results.csv
 results/axis_train_log.txt
 results/dicom_snimki_extract_*.csv
 results/validation_runs/
+results/*.sh
+results/*.json
+results/*.jsonl
+results/*.txt
+results/*.pdf
+
+# Local one-off scripts and scratch files
+_final_verify_gpu.py
+_write_gpu_reqs.py
+scripts/_dep_check_tmp.py
+scripts/scan_runner.py
+scripts/*.sh
+echo
+pytest_ui_fix.out
+dicexe/
+*.zip
+*.pdf
 
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/
@@ -54,3 +85,6 @@ results/validation_runs/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Accidental one-character scratch file at repo root
+ 

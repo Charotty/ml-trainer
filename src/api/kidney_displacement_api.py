@@ -10,33 +10,24 @@ AR / sensors workflow lives in ``src/api/api_server.py`` (different contract).
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
-import joblib
 import numpy as np
 import pandas as pd
-import sys
 import os
 from datetime import datetime
 import logging
 
-# Добавляем путь к модулям
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'phase1'))
-from adaptive_ensemble import AdaptiveEnsembleTrainer
-from src.features.na_trend_features import NaTrendStore
-from src.features.pipeline import predict_targets
+from src.models.runtime import RuntimePredictor, default_model_path
+from src.models.uncertainty import (
+    extract_conformal_from_model_data,
+    intervals_for_point_predictions,
+)
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Canonical production artifact (honest clinical training with na_trends).
-DEFAULT_MODEL_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "..",
-    "models",
-    "adaptive_ensemble_clinical_honest.pkl",
-)
+DEFAULT_MODEL_PATH = str(default_model_path())
 LEGACY_MODEL_NAME = "adaptive_ensemble.pkl"
 
 # Инициализация FastAPI
@@ -47,8 +38,8 @@ app = FastAPI(
 )
 
 # Глобальные переменные
+runtime_predictor: Optional[RuntimePredictor] = None
 model_data = None
-trainer = None
 feature_names = None
 
 class PatientData(BaseModel):
@@ -84,14 +75,20 @@ class PatientData(BaseModel):
     sex: Optional[float] = Field(
         None,
         description="Пол пациента, код (1.0 = М, 2.0 = Ж). Опционально — "
-        "при отсутствии импутируется медианой обучающей выборки.",
+        "при отсутствии остаётся NaN до persisted imputer; не подменяется 0.",
     )
-    age: Optional[float] = Field(None, description="Возраст пациента, лет. Опционально.")
-    bmi: Optional[float] = Field(None, description="Индекс массы тела (BMI). Опционально.")
+    age: Optional[float] = Field(
+        None,
+        description="Возраст пациента, лет. Опционально; missing stays missing (not 50).",
+    )
+    bmi: Optional[float] = Field(
+        None,
+        description="Индекс массы тела (BMI). Опционально; missing stays missing (not 25).",
+    )
     body_type: Optional[float] = Field(
         None,
         description="Тип телосложения, код (0=нормостеническое, 1=астеническое, "
-        "2=гиперстеническое). Опционально.",
+        "2=гиперстеническое). 0 is a real class, not 'unknown'. Опционально.",
     )
     has_previous_surgery: Optional[float] = Field(
         None,
@@ -127,8 +124,8 @@ class PredictResponse(BaseModel):
 
 def load_model():
     """Загрузка модели при старте сервера"""
-    global model_data, trainer, feature_names
-    
+    global model_data, feature_names, runtime_predictor
+
     try:
         model_path = os.environ.get("MODEL_PATH", DEFAULT_MODEL_PATH)
         if os.path.basename(model_path) == LEGACY_MODEL_NAME:
@@ -137,31 +134,16 @@ def load_model():
                 "'models/adaptive_ensemble_clinical_honest.pkl'.",
                 model_path,
             )
-        model_data = joblib.load(model_path)
-
-        enrichment_mode = model_data.get("enrichment_mode", "projection")
-        store_payload = model_data.get("na_trend_store")
-        na_trend_store = (
-            NaTrendStore.from_dict(store_payload) if store_payload else None
-        )
-        trainer = AdaptiveEnsembleTrainer(
-            enrichment_mode=enrichment_mode,
-            na_trend_store=na_trend_store,
-            z_head=model_data.get("z_head", "ensemble"),
-        )
-        
-        feature_names = model_data['feature_names']
-        trainer.feature_names = feature_names
-
+        runtime_predictor = RuntimePredictor.load(model_path)
+        model_data = runtime_predictor.payload
+        feature_names = list(runtime_predictor.bundle.feature_names)
         logger.info(
-            "Модель успешно загружена. Признаков: %s, enrichment_mode=%s, "
-            "na_trend_store=%s",
+            "Модель успешно загружена. Признаков: %s, enrichment_mode=%s",
             len(feature_names),
-            enrichment_mode,
-            na_trend_store is not None,
+            runtime_predictor.enrichment_mode(),
         )
         return True
-        
+
     except Exception as e:
         logger.error(f"Ошибка загрузки модели: {e}")
         return False
@@ -183,7 +165,7 @@ def predict_displacement(patient_data: PatientData) -> Dict[str, float]:
       - 503: модель не загружена (артефакты не доступны);
       - 500: непредвиденная серверная ошибка.
     """
-    if model_data is None or feature_names is None:
+    if runtime_predictor is None or model_data is None or feature_names is None:
         raise HTTPException(status_code=503, detail="Модель не загружена")
 
     if hasattr(patient_data, "model_dump"):
@@ -192,7 +174,7 @@ def predict_displacement(patient_data: PatientData) -> Dict[str, float]:
         patient_dict = patient_data.dict()
 
     try:
-        predictions = predict_targets(trainer, model_data, patient_dict)
+        predictions = runtime_predictor.predict_row(patient_dict)
         return predictions
     except HTTPException:
         raise
@@ -218,13 +200,16 @@ async def startup_event():
 
 @app.get("/health")
 async def health_check():
-    """Проверка работоспособности сервиса"""
+    """Liveness: report loaded feature_count. Does not name a production winner."""
+    n_feat = len(feature_names) if feature_names else 0
+    n_targets = len(model_data["models"]) if model_data else 0
     return {
         "status": "ok",
-        "model_version": "optimized_adaptive_ensemble_v1.0",
-        "features_count": len(feature_names) if feature_names else 0,
-        "targets_count": len(model_data['models']) if model_data else 0,
-        "timestamp": datetime.now().isoformat()
+        "model_loaded": model_data is not None,
+        "feature_count": n_feat,
+        "features_count": n_feat,
+        "targets_count": n_targets,
+        "timestamp": datetime.now().isoformat(),
     }
 
 def _performance_from_training_meta(payload: dict) -> dict:
@@ -271,16 +256,17 @@ async def get_model_info():
         raise HTTPException(status_code=503, detail="Модель не загружена")
     
     # Получение оптимизированных весов
-    optimized_weights = getattr(trainer, '_optimized_weights', {})
+    optimized_weights = (model_data or {}).get("adaptive_weights") or {}
     training_meta = model_data.get("training_meta") if isinstance(model_data, dict) else None
     
     return {
         "model_info": {
-            "name": "Optimized Adaptive Ensemble",
-            "version": "1.0",
+            "name": "Adaptive Ensemble (loaded alias, not a production winner)",
+            "version": None,
             "features_count": len(feature_names),
             "targets_count": len(model_data['models']),
-            "data_sources": "DICOMS+Vybor+KiTS19",
+            "data_sources": (training_meta or {}).get("data_sources") if isinstance(training_meta, dict) else None,
+            "production_winner": False,
             "performance": _performance_from_training_meta(model_data),
             "training_meta": training_meta,
             "feature_types": {
@@ -292,6 +278,15 @@ async def get_model_info():
         },
         "feature_names": feature_names
     }
+
+def prediction_uncertainty_payload(predictions: Dict[str, float]) -> Dict[str, Any]:
+    """OOF residual conformal intervals, or an explicit unavailable payload.
+
+    Never returns a magnitude-based fake confidence score.
+    """
+    conformal = extract_conformal_from_model_data(model_data)
+    return intervals_for_point_predictions(predictions, conformal)
+
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict(request: PredictRequest):
@@ -307,18 +302,21 @@ async def predict(request: PredictRequest):
             detail=f"Внутренняя ошибка сервера: {exc}",
         )
 
-    confidence = {
-        target: min(0.95, max(0.5, 1.0 - abs(pred) / 50.0))
-        for target, pred in predictions.items()
-    }
+    uncertainty = prediction_uncertainty_payload(predictions)
 
+    loaded_name = (
+        runtime_predictor.model_path.name
+        if runtime_predictor is not None
+        else "unloaded"
+    )
     return PredictResponse(
         success=True,
         predictions=predictions,
         metadata={
-            "model_version": "optimized_adaptive_ensemble_v1.0",
-            "features_used": len(feature_names),
-            "prediction_confidence": confidence,
+            "model_id": loaded_name,
+            "features_used": len(feature_names) if feature_names is not None else 0,
+            "uncertainty": uncertainty,
+            "prediction_confidence": None,
             "timestamp": datetime.now().isoformat(),
         },
     )
@@ -335,7 +333,7 @@ async def predict_batch(request: BatchPredictRequest):
       - 503: модель не загружена;
       - 500: непредвиденная серверная ошибка.
     """
-    if model_data is None or feature_names is None:
+    if runtime_predictor is None or model_data is None or feature_names is None:
         raise HTTPException(status_code=503, detail="Модель не загружена")
     if not request.patients:
         raise HTTPException(status_code=400, detail="Список пациентов пуст")
@@ -376,7 +374,12 @@ async def predict_batch(request: BatchPredictRequest):
             "total_patients": total,
             "successful_predictions": successful_predictions,
             "failed_predictions": total - successful_predictions,
-            "model_version": "optimized_adaptive_ensemble_v1.0",
+            "model_id": (
+                runtime_predictor.model_path.name
+                if runtime_predictor is not None
+                else None
+            ),
+            "feature_count": len(feature_names) if feature_names is not None else 0,
             "timestamp": datetime.now().isoformat(),
         },
     }
@@ -388,6 +391,7 @@ async def root():
         "message": "Kidney Displacement Prediction API (canonical)",
         "version": "1.0.0",
         "service_role": "kidney_displacement_prediction",
+        "production_winner": False,
         "docs": "/docs",
         "health": "/health",
         "model_info": "/model_info",

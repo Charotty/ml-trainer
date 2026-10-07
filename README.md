@@ -13,47 +13,52 @@ ML-проект для прогнозирования смещения поче�
 ## Актуальная архитектура
 
 - **Основная модель:** `Adaptive Ensemble` (RF + Lasso + Ridge + GBT).
-- **Артефакт production:** `models/adaptive_ensemble_clinical_honest.pkl` (**121** признак).
+- **Рабочий alias (не победитель):** `models/adaptive_ensemble_clinical_honest.pkl` — currently the **111-feature** working-tree file. Git HEAD archive is the **121-feature** candidate. Neither is promoted.
 - **Основной режим для клиники:** `na_trends` (когортные тренды из `na_spine` и `na_boku`) + клинические demographics.
-- **Валидация:** `GroupKFold(5)` с OOF-оценкой по пациентам.
+- **Валидация:** требуется исправленная nested `GroupKFold` OOF на n=87; исторический не-nested GKF-OOF не является production-доказательством.
 - **Ключевой скрипт обучения:** `scripts/data/train_clinical_honest.py`.
-- **Ключевые отчёты:**
-  - `docs/CLINICAL_VALIDATION_RUN_REPORT_20260630.md`
-  - `docs/NA_TRENDS_PRODUCTION_REPORT.md`
-  - `docs/SYSTEM_DATA_FLOW_SCHEME.md`
-  - `docs/REPO_WORK_CHECKLIST.md`
+- **Источник метрик и гейтов:** [`docs/MODEL_CARD.md`](docs/MODEL_CARD.md), [`docs/MODEL_RELEASE_GATES.md`](docs/MODEL_RELEASE_GATES.md), JSON-карточки в `models/archive/`.
 
-## Метрики (актуальный срез)
+## Метрики (заморозка, не production)
 
-GroupKFold-OOF на клинических парных метках из displacement XLSX.
+**Ни 8.52 мм, ни 8.40 / 8.49 мм не доказаны для текущего alias.** Оба кандидата в архиве, `production_winner: false`. Исторический MAE **2.14 мм** — leaky/in-sample, не production. Исправленная nested OOF на n=87 для f111 vs f121 ещё не прогонялась в этом блоке.
 
-### Клиническая валидация (production, na_trends)
-
-| Метрика | Значение |
-|---|---:|
-| Avg MAE | **8.52 мм** |
-| MAE Z | 11.63 мм |
-| 95% CI (Avg MAE) | 7.82 – 9.26 мм |
-| Признаков | **121** |
-| Выборка | **n=87** |
+| Кандидат | Признаки | SHA prefix | Статус |
+|---|---:|---|---|
+| working-tree snapshot | **111** | `3E03B8FA` | archived, research-only |
+| Git HEAD archive | **121** | `5F317838` | archived, research-only |
 
 ## Быстрый старт (локально)
 
+Канонический вход — **CT Workbench** на порту **8010** (`src.api.ct_workbench_api`). На машине разработки (WSL) используйте venv `/home/user/venv-ml-trainer`.
+
 ```bash
-cd /path/to/ml-trainer
-pip install -r requirements.txt
+cd /mnt/e/ml/ml-trainer   # или путь к клону
+source /home/user/venv-ml-trainer/bin/activate
+# иначе: python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+
+export PYTHONPATH="$PWD"
+# alias модели (research-only, не promoted winner):
+ls -lh models/adaptive_ensemble_clinical_honest.pkl
+# опционально: export MODEL_PATH="$PWD/models/adaptive_ensemble_clinical_honest.pkl"
+
 python -m uvicorn src.api.ct_workbench_api:app --host 0.0.0.0 --port 8010
 ```
+
+Перезапуск в WSL: `bash scripts/tools/restart_workbench_wsl.sh` (тот же venv, тот же uvicorn на `:8010`, лог `/tmp/ct_workbench_uvicorn.log`).
 
 Открыть: http://127.0.0.1:8010/
 
 ### Обучение honest-модели
 
+Ключевой скрипт: `scripts/data/train_clinical_honest.py`. Считает nested GroupKFold OOF; не смешивайте это с историческим не-nested GKF-OOF и не трактуйте in-sample MAE как production.
+
 ```bash
+source /home/user/venv-ml-trainer/bin/activate
 python scripts/data/train_clinical_honest.py --z-head ensemble
 ```
 
-Артефакт: `models/adaptive_ensemble_clinical_honest.pkl`.
+Полный цикл после свежих extract (WSL): `bash scripts/tools/wsl_retrain_clinical_honest.sh` (из Windows: `scripts/tools/launch_wsl_retrain.ps1`). Артефакт alias: `models/adaptive_ensemble_clinical_honest.pkl`.
 
 ## Развёртывание в Docker
 
@@ -97,7 +102,8 @@ docker compose up -d --build
 
 ```bash
 curl -s http://127.0.0.1:8010/health
-# ожидается: "status":"ok", "model_loaded":true, "feature_count":121
+# ожидается: "status":"ok", "model_loaded":true;
+# feature_count = число признаков загруженного файла (111 или 121), не флаг победителя.
 ```
 
 UI: http://127.0.0.1:8010/
@@ -163,12 +169,13 @@ docs/                       # отчёты и материалы
 Браузерный интерфейс для загрузки supine-МСКТ, QA признаков и ML-прогноза смещения почек.
 
 - Спецификация: [`frontend/docs/PRD.md`](frontend/docs/PRD.md)
-- Локально: `python -m uvicorn src.api.ct_workbench_api:app --port 8010`
+- Локально / WSL: venv `/home/user/venv-ml-trainer`, затем `python -m uvicorn src.api.ct_workbench_api:app --host 0.0.0.0 --port 8010` или `bash scripts/tools/restart_workbench_wsl.sh`
 - Docker: см. раздел выше
 
 ## Важные замечания
 
-- **Proxy ≠ production:** clinical production — honest-путь (`scripts/data/train_clinical_honest.py` → `models/adaptive_ensemble_clinical_honest.pkl`).
+- **Proxy ≠ clinical labels:** honest-путь (`scripts/data/train_clinical_honest.py` → alias `.pkl`). The alias is **not** a promoted winner.
 - **KiTS опционален** для honest-обучения.
+- Карточка модели / гейты: [`docs/MODEL_CARD.md`](docs/MODEL_CARD.md), [`docs/MODEL_RELEASE_GATES.md`](docs/MODEL_RELEASE_GATES.md).
 - Операционный чеклист: [`docs/REPO_WORK_CHECKLIST.md`](docs/REPO_WORK_CHECKLIST.md).
 - Система исследовательская / вспомогательная; не заменяет клиническое решение врача.

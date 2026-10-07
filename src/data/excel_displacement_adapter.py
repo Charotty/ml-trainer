@@ -8,7 +8,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from src.features.phase1_schema import BASE_FEATURES, TARGET_NAMES, normalize_dataframe
+from src.features.fold_categoricals import encode_sex_label
+from src.features.phase1_schema import BASE_FEATURES, TARGET_NAMES, filter_any_kidney_targets, normalize_dataframe
 
 DEFAULT_EXCEL_PATH = "data/train_displacement_dataset.csv"
 
@@ -34,14 +35,8 @@ def _parse_numeric_series(series: pd.Series) -> pd.Series:
 
 
 def _sex_to_vybor_code(value: object) -> float:
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return np.nan
-    text = str(value).strip().lower()
-    if text in {"м", "m", "male", "1", "1.0"}:
-        return 1.0
-    if text in {"ж", "f", "female", "2", "2.0"}:
-        return 2.0
-    return np.nan
+    """Canonical 1/2 sex code; unknown stays NaN (never 0)."""
+    return encode_sex_label(value)
 
 
 def _body_type_to_code(value: object) -> float:
@@ -201,11 +196,11 @@ def load_excel_displacement_table(
         exclude = {_normalize_name_key(n) for n in vybor_df["full_name"].dropna()}
         exclude.discard("")
     converted = convert_excel_displacement_df(excel_raw, exclude_names=exclude)
-    complete = converted.dropna(subset=list(TARGET_NAMES), how="any")
-    skipped = len(converted) - len(complete)
+    kept = filter_any_kidney_targets(converted)
+    skipped = len(converted) - len(kept)
     if skipped:
         print(
-            f"[excel] Skipped {skipped} rows with incomplete targets "
-            f"(kept {len(complete)} unique vs Vybor)"
+            f"[excel] Skipped {skipped} rows with no labeled kidney side "
+            f"(kept {len(kept)} unique vs Vybor)"
         )
-    return complete
+    return kept

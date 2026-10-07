@@ -1,0 +1,8 @@
+[
+  {"run_id": "1_median", "args": ["--stage", "1", "--tag", "median", "--change", "базовое решение: глобальная медиана", "--model-kind", "median", "--estimator-profile", "production", "--enrichment-mode", "na_trends"]},
+  {"run_id": "1_mean", "args": ["--stage", "1", "--tag", "mean", "--change", "базовое решение: среднее", "--model-kind", "mean", "--estimator-profile", "production", "--enrichment-mode", "na_trends"]},
+  {"run_id": "1_group_median", "args": ["--stage", "1", "--tag", "group_median", "--change", "базовое решение: медиана по полу и телосложению", "--model-kind", "group_median", "--estimator-profile", "production", "--enrichment-mode", "na_trends"]},
+  {"run_id": "1_ridge", "args": ["--stage", "1", "--tag", "ridge", "--change", "базовое решение: гребневая регрессия", "--model-kind", "ridge", "--estimator-profile", "production", "--enrichment-mode", "na_trends"]},
+  {"run_id": "1_rf", "args": ["--stage", "1", "--tag", "rf", "--change", "базовое решение: случайный лес (production)", "--model-kind", "rf", "--estimator-profile", "production", "--enrichment-mode", "na_trends"]},
+  {"run_id": "1_gbt", "args": ["--stage", "1", "--tag", "gbt", "--change", "базовое решение: градиентный бустинг (production)", "--model-kind", "gbt", "--estimator-profile", "production", "--enrichment-mode", "na_trends"]}
+]

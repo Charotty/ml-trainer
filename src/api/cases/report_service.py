@@ -7,10 +7,7 @@ from typing import Any, Dict
 from .schemas import FeaturesResponse
 from .storage import CaseStorage
 
-DISCLAIMER = (
-    "Исследовательский инструмент для планирования доступа. "
-    "Не заменяет клинический протокол, осмотр и решение лечащего врача."
-)
+from src.visualization.report_contract import DISCLAIMER
 
 
 def build_report_dict(

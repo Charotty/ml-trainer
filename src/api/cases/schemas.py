@@ -26,7 +26,7 @@ class CaseStatusResponse(BaseModel):
 
 
 class ManualFeaturesPatch(BaseModel):
-    overrides: Dict[str, float] = Field(..., description="BASE_FEATURES overrides")
+    overrides: Dict[str, Any] = Field(..., description="BASE / clinical / span / laterality overrides")
     reason: Optional[str] = Field(None, description="Why manual correction was made")
     author: Optional[str] = Field("local_user", description="Local user id for audit")
 
@@ -40,12 +40,14 @@ class FeaturesResponse(BaseModel):
 
 
 class PredictResponse(BaseModel):
-    predictions: Dict[str, float]
+    predictions: Dict[str, Optional[float]]
     model_id: str
     enrichment_mode: str
     feature_count: int
     sanity_ok: bool = True
     warnings: List[str] = Field(default_factory=list)
+    laterality: Dict[str, str] = Field(default_factory=dict)
+    withheld_targets: List[str] = Field(default_factory=list)
 
 
 class CaseSummary(BaseModel):

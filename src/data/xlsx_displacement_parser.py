@@ -1,23 +1,46 @@
-"""Parse ``Смещение - конечное -12  (2).xlsx`` into canonical Vybor schema."""
+"""Parse displacement workbook (``-13`` preferred) into canonical Vybor schema."""
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Mapping, Optional, Sequence
+from typing import Iterable, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
 
 from src.data.excel_displacement_adapter import convert_excel_displacement_df
+from src.data.holdout import (
+    holdout_surname_keys,
+    is_holdout_name,
+    normalize_surname_key,
+)
 from src.features.displacement_axis_features import CLINICAL_EXTRA_COLUMNS
-from src.features.phase1_schema import TARGET_NAMES, normalize_dataframe
+from src.features.phase1_schema import (
+    TARGET_NAMES,
+    filter_any_kidney_targets,
+    labeled_kidneys_series,
+    normalize_dataframe,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-_DATA_XLSX = list((REPO_ROOT / "data").glob("*.xlsx"))
-DEFAULT_XLSX_PATH = (
-    _DATA_XLSX[0] if _DATA_XLSX else REPO_ROOT / "Смещение - конечное -12  (2).xlsx"
-)
+
+
+def _resolve_default_xlsx() -> Path:
+    """Prefer the -13 workbook at repo root, then data/*.xlsx, then legacy -12."""
+    preferred = list(REPO_ROOT.glob("*конечное*-13*.xlsx")) + list(
+        REPO_ROOT.glob("*13*.xlsx")
+    )
+    for path in preferred:
+        if path.is_file() and path.suffix.lower() == ".xlsx":
+            return path
+    data_xlsx = list((REPO_ROOT / "data").glob("*.xlsx"))
+    if data_xlsx:
+        return data_xlsx[0]
+    return REPO_ROOT / "Смещение - конечное -12  (2).xlsx"
+
+
+DEFAULT_XLSX_PATH = _resolve_default_xlsx()
 DEFAULT_OUTPUT_CSV = REPO_ROOT / "data" / "vybor_from_xlsx.csv"
 
 HEADER_ROW = 4
@@ -107,11 +130,20 @@ def _cell(row: Sequence[object], col: int) -> object:
 
 
 def _surname_key(name: object) -> str:
-    if name is None:
-        return ""
-    text = str(name).strip().lower().replace("ё", "е")
-    token = re.split(r"[\s.]+", text)[0]
-    return re.sub(r"[^a-zа-я0-9]", "", token)
+    return normalize_surname_key(name)
+
+
+def _is_header_like_row(row: Sequence[object]) -> bool:
+    """Detect repeated column-header rows (e.g. excel row 130 in -13)."""
+    row_no = _cell(row, _COL["row_no"])
+    fio = _cell(row, _COL["fio"])
+    row_no_text = str(row_no).strip().lower() if row_no is not None else ""
+    fio_text = str(fio).strip().lower() if fio is not None else ""
+    if row_no_text in {"№", "no", "n", "#"} or "№" in row_no_text:
+        return True
+    if fio_text in {"фио", "fio", "full_name", "имя"}:
+        return True
+    return False
 
 
 def _delta(lateral: float, supine: float) -> float:
@@ -129,24 +161,50 @@ def _read_xlsx_rows(path: Path) -> list[tuple]:
     return rows
 
 
-def parse_xlsx_raw_table(path: Path | str = DEFAULT_XLSX_PATH) -> pd.DataFrame:
-    """Return a table compatible with ``train_displacement_dataset.csv`` schema."""
+def parse_xlsx_raw_table(
+    path: Path | str = DEFAULT_XLSX_PATH,
+    *,
+    exclude_surnames: Iterable[str] | None = None,
+) -> pd.DataFrame:
+    """Return a table compatible with ``train_displacement_dataset.csv`` schema.
+
+    Skips repeated header rows (e.g. sheet row 130 in -13). Uses 1-based
+    ``excel_row`` as the stable identity so restarted №1..3 after a header
+    do not collide as ``excel_1``. When ``exclude_surnames`` is set, matching
+    patients are omitted (ё/е and Latin aliases via ``normalize_surname_key``).
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"XLSX not found: {path}")
 
+    banned: set[str] = set()
+    if exclude_surnames is not None:
+        banned = {normalize_surname_key(s) for s in exclude_surnames}
+        banned.discard("")
+
     rows = _read_xlsx_rows(path)
     records: list[dict[str, object]] = []
 
-    for row in rows[DATA_START_ROW:]:
+    for sheet_idx, row in enumerate(rows):
+        excel_row = sheet_idx + 1  # 1-based sheet row
+        if sheet_idx < DATA_START_ROW:
+            continue
+        if _is_header_like_row(row):
+            continue
         row_no = _parse_numeric(_cell(row, _COL["row_no"]))
         fio = _cell(row, _COL["fio"])
         if not np.isfinite(row_no) and (fio is None or str(fio).strip() == ""):
             continue
+        fio_text = str(fio).strip() if fio is not None else ""
+        if banned and is_holdout_name(fio_text, banned):
+            continue
 
         record: dict[str, object] = {
-            "row_no": int(row_no) if np.isfinite(row_no) else len(records) + 1,
-            "fio": str(fio).strip() if fio is not None else "",
+            # Stable unique id from sheet position (avoids excel_1 collisions).
+            "excel_row": int(excel_row),
+            "row_no": int(excel_row),
+            "sheet_row_no": int(row_no) if np.isfinite(row_no) else None,
+            "fio": fio_text,
             "sex": _cell(row, _COL["sex"]),
             "age": _parse_numeric(_cell(row, _COL["age"])),
             "body_type": _cell(row, _COL["body_type"]),
@@ -282,19 +340,43 @@ def build_vybor_from_xlsx(
     *,
     boku_path: Optional[Path | str] = None,
     delta_point: str = "middle",
-    require_complete_targets: bool = True,
+    require_complete_targets: bool = False,
+    require_any_kidney_targets: bool = True,
+    exclude_surnames: Iterable[str] | None = None,
 ) -> pd.DataFrame:
-    """Parse xlsx, convert to Phase-1 schema, optionally enrich from na_boku."""
-    raw = parse_xlsx_raw_table(xlsx_path)
+    """Parse xlsx, convert to Phase-1 schema, optionally enrich from na_boku.
+
+    By default keeps single-kidney / unilaterally labeled rows (at least one
+    side with complete middle-point XYZ deltas). Set
+    ``require_complete_targets=True`` to restore the old both-kidneys filter.
+
+    ``exclude_surnames`` drops matching patients (holdout). Pass an empty
+    iterable to keep everyone; ``None`` defaults to config/holdout_patients.yaml.
+    """
+    path = Path(xlsx_path)
+    if exclude_surnames is None:
+        banned = holdout_surname_keys()
+    else:
+        banned = {normalize_surname_key(s) for s in exclude_surnames}
+        banned.discard("")
+
+    raw = parse_xlsx_raw_table(path, exclude_surnames=banned)
     converted = convert_excel_displacement_df(raw, delta_point=delta_point)
     converted = attach_clinical_extras(converted, raw)
 
-    xlsx_rows = _read_xlsx_rows(Path(xlsx_path))
+    xlsx_rows = _read_xlsx_rows(path)
     volumes: list[tuple[float, float]] = []
-    for row in xlsx_rows[DATA_START_ROW:]:
+    for sheet_idx, row in enumerate(xlsx_rows):
+        if sheet_idx < DATA_START_ROW:
+            continue
+        if _is_header_like_row(row):
+            continue
         row_no = _parse_numeric(_cell(row, _COL["row_no"]))
         fio = _cell(row, _COL["fio"])
         if not np.isfinite(row_no) and (fio is None or str(fio).strip() == ""):
+            continue
+        fio_text = str(fio).strip() if fio is not None else ""
+        if banned and is_holdout_name(fio_text, banned):
             continue
         volumes.append(
             (
@@ -311,20 +393,33 @@ def build_vybor_from_xlsx(
     if boku_path:
         converted = enrich_with_boku_volumes(converted, boku_path)
 
+    converted["labeled_kidneys"] = labeled_kidneys_series(converted)
+
     if require_complete_targets:
         before = len(converted)
         converted = converted.dropna(subset=list(TARGET_NAMES), how="any").copy()
         skipped = before - len(converted)
         if skipped:
             print(
-                f"[xlsx] Skipped {skipped} rows with incomplete middle-point deltas "
+                f"[xlsx] Skipped {skipped} rows without both-kidney middle deltas "
                 f"(kept {len(converted)})"
+            )
+    elif require_any_kidney_targets:
+        before = len(converted)
+        converted = filter_any_kidney_targets(converted)
+        skipped = before - len(converted)
+        both = int((converted["labeled_kidneys"] == "both").sum())
+        one = int(converted["labeled_kidneys"].isin(["left", "right"]).sum())
+        if skipped or one:
+            print(
+                f"[xlsx] Kept {len(converted)} rows with >=1 labeled kidney "
+                f"(both={both}, one-sided={one}; dropped {skipped} with no side)"
             )
 
     converted["source"] = "Vybor"
     converted["source_name"] = "Vybor"
     converted["label_quality"] = "clinical"
-    converted["data_origin"] = "Смещение - конечное -12  (2).xlsx"
+    converted["data_origin"] = path.name
     return converted
 
 

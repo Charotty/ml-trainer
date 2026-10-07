@@ -12,13 +12,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "models" / "phase1"))
-sys.path.insert(0, str(ROOT / "scripts" / "validation"))
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-from adaptive_ensemble import AdaptiveEnsembleTrainer  # noqa: E402
+from src.models.ensemble import AdaptiveEnsembleTrainer  # noqa: E402
 from src.data.xlsx_displacement_parser import DEFAULT_OUTPUT_CSV  # noqa: E402
 from src.features.phase1_schema import TARGET_NAMES, normalize_dataframe  # noqa: E402
 

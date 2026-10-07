@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from src.features.phase1_schema import BASE_FEATURES, TARGET_NAMES, normalize_dataframe
+from src.features.ct_geometry import X_DISTRIBUTION_FEATURES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HARMONIZED_DIR = REPO_ROOT / "data" / "harmonized"
@@ -49,6 +50,10 @@ SCALE_FEATURES = [
     for c in BASE_FEATURES
     if c not in DISTANCE_COLUMNS and c not in SPINE_COLUMNS + COM_COLUMNS
 ]
+
+# Signed laterality (clinical-frame X). Must not be IQR-rescaled when the
+# source IQR collapsed to ~0 (abs-from-kidney-midpoint degeneration).
+SIGNED_X_COLUMNS = list(X_DISTRIBUTION_FEATURES)
 
 
 @dataclass
@@ -94,6 +99,17 @@ def _robust_stats(series: pd.Series) -> Dict[str, float]:
 
 def _stats_usable_for_rescale(stats: Mapping[str, float], *, min_valid: int = 5) -> bool:
     return int(stats.get("n_valid", 0)) >= min_valid
+
+
+def _signed_x_source_degenerate(stats: Mapping[str, float], *, eps: float = 1e-3) -> bool:
+    """True when a signed X column has collapsed to ~zero (old abs-midpoint bug).
+
+    Uses p25/p50/p75 rather than IQR: ``_robust_stats`` floors a zero IQR to 1.0.
+    """
+    p25 = float(stats.get("p25", 0.0) or 0.0)
+    p50 = float(stats.get("p50", 0.0) or 0.0)
+    p75 = float(stats.get("p75", 0.0) or 0.0)
+    return abs(p25) < eps and abs(p50) < eps and abs(p75) < eps
 
 
 def build_reference_stats(reference_df: pd.DataFrame, *, source: str = "vybor") -> ReferenceStats:
@@ -236,6 +252,9 @@ def harmonize_dataframe(
             continue
         if not _stats_usable_for_rescale(src_stats[col]):
             continue
+        if col in SIGNED_X_COLUMNS and _signed_x_source_degenerate(src_stats[col]):
+            # Do not map a collapsed-to-zero X axis onto the train median.
+            continue
         out[col] = _robust_rescale_column(
             out[col], src_stats[col], reference.feature_stats[col]
         )
@@ -289,6 +308,72 @@ def alignment_report(
     return pd.DataFrame(rows)
 
 
+def compare_x_feature_distributions(
+    reference_df: pd.DataFrame,
+    infer_df: pd.DataFrame,
+    *,
+    median_iqr_factor: float = 5.0,
+    iqr_ratio_max: float = 8.0,
+    features: Optional[Sequence[str]] = None,
+) -> Dict[str, object]:
+    """Gate train vs inference X geometry (median / IQR).
+
+    Returns a dict with ``wild_divergence`` (numerical mismatch), ``ood_flagged``
+    (inference rows already marked ``geometry_ood_x``), and ``compatible``
+    which is True when there is no wild divergence *or* the mismatch is
+    explicitly OOD-flagged. Tests should fail when ``compatible`` is False.
+    """
+    cols = list(features or X_DISTRIBUTION_FEATURES)
+    ref = normalize_dataframe(reference_df)
+    inf = infer_df.copy()
+    diverged: List[str] = []
+    per_feature: Dict[str, Dict[str, float]] = {}
+    for col in cols:
+        if col not in ref.columns or col not in inf.columns:
+            continue
+        r = pd.to_numeric(ref[col], errors="coerce").dropna()
+        a = pd.to_numeric(inf[col], errors="coerce").dropna()
+        if len(r) == 0 or len(a) == 0:
+            continue
+        ref_iqr = float(np.percentile(r, 75) - np.percentile(r, 25))
+        if ref_iqr < 1e-6:
+            ref_iqr = float(r.std()) if float(r.std()) > 1e-6 else 1.0
+        inf_iqr = float(np.percentile(a, 75) - np.percentile(a, 25))
+        if inf_iqr < 1e-6:
+            inf_iqr = 0.0
+        delta_median = float(a.median() - r.median())
+        iqr_ratio = (inf_iqr / ref_iqr) if ref_iqr > 0 else float("inf")
+        per_feature[col] = {
+            "ref_median": float(r.median()),
+            "infer_median": float(a.median()),
+            "delta_median": delta_median,
+            "ref_iqr": ref_iqr,
+            "infer_iqr": inf_iqr,
+            "iqr_ratio": float(iqr_ratio),
+        }
+        if abs(delta_median) > median_iqr_factor * ref_iqr:
+            diverged.append(f"{col}: |delta_median|={abs(delta_median):.3f} > {median_iqr_factor}×IQR")
+        if iqr_ratio > iqr_ratio_max:
+            diverged.append(f"{col}: IQR ratio {iqr_ratio:.2f} > {iqr_ratio_max}")
+
+    ood_flagged = False
+    if "geometry_ood_x" in inf.columns:
+        flags = inf["geometry_ood_x"]
+        if flags.dtype == bool or flags.dtype == object:
+            ood_flagged = bool(pd.Series(flags).astype(bool).any())
+        else:
+            ood_flagged = bool(pd.to_numeric(flags, errors="coerce").fillna(0).astype(bool).any())
+
+    wild = bool(diverged)
+    return {
+        "wild_divergence": wild,
+        "ood_flagged": ood_flagged,
+        "compatible": (not wild) or ood_flagged,
+        "diverged": diverged,
+        "features": per_feature,
+    }
+
+
 def default_harmonization_manifest(
     *,
     reference_path: Path,
@@ -302,6 +387,7 @@ def default_harmonization_manifest(
         "outputs": outputs,
         "notes": (
             "DICOM/LPS extracts: Y-axis sign flip + robust IQR rescale per BASE feature "
-            "to Vybor; spine/body_com anchored to Vybor medians; distances recomputed."
+            "to Vybor; signed X rel/sep are not rescaled when their source IQR has "
+            "collapsed to zero; spine/body_com anchored to Vybor medians; distances recomputed."
         ),
     }

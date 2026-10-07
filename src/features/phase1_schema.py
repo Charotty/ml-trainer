@@ -91,6 +91,53 @@ TARGET_NAMES: List[str] = [
     "kidney_right_delta_z",
 ]
 
+LEFT_TARGET_NAMES: List[str] = [
+    "kidney_left_delta_x",
+    "kidney_left_delta_y",
+    "kidney_left_delta_z",
+]
+
+RIGHT_TARGET_NAMES: List[str] = [
+    "kidney_right_delta_x",
+    "kidney_right_delta_y",
+    "kidney_right_delta_z",
+]
+
+
+def has_complete_left_targets(df: pd.DataFrame) -> pd.Series:
+    cols = [c for c in LEFT_TARGET_NAMES if c in df.columns]
+    if len(cols) != len(LEFT_TARGET_NAMES):
+        return pd.Series(False, index=df.index)
+    return df[cols].notna().all(axis=1)
+
+
+def has_complete_right_targets(df: pd.DataFrame) -> pd.Series:
+    cols = [c for c in RIGHT_TARGET_NAMES if c in df.columns]
+    if len(cols) != len(RIGHT_TARGET_NAMES):
+        return pd.Series(False, index=df.index)
+    return df[cols].notna().all(axis=1)
+
+
+def labeled_kidneys_series(df: pd.DataFrame) -> pd.Series:
+    """``both`` / ``left`` / ``right`` / ``none`` from middle-point delta completeness."""
+    left = has_complete_left_targets(df)
+    right = has_complete_right_targets(df)
+    out = pd.Series("none", index=df.index, dtype=object)
+    out = out.mask(left & right, "both")
+    out = out.mask(left & ~right, "left")
+    out = out.mask(~left & right, "right")
+    return out
+
+
+def filter_any_kidney_targets(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep rows with at least one complete kidney (3 middle deltas).
+
+    Single-kidney / unilaterally labeled clinical cases are valid supervised
+    examples for the present side; missing contralateral targets stay NaN.
+    """
+    keep = has_complete_left_targets(df) | has_complete_right_targets(df)
+    return df.loc[keep].copy()
+
 # Stored in some datasets but never passed as raw model inputs.
 OPTIONAL_METADATA_COLUMNS: List[str] = [
     "scan_position",

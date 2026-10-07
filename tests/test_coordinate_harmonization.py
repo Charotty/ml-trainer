@@ -78,3 +78,48 @@ def test_vybor_identity_passthrough():
         out["kidney_left_center_x_rel"].reset_index(drop=True),
         check_names=False,
     )
+
+
+def test_harmonize_skips_iqr_rescale_for_collapsed_signed_x():
+    """Zero-IQR X rel must not be mapped onto the clinical train median."""
+    ref = pd.DataFrame(
+        {
+            "kidney_left_center_x_rel": [1.5, 2.0, -1.0, 3.0, 0.5, 4.0, -2.0, 1.0],
+            "kidney_right_center_x_rel": [-1.5, -2.0, 1.0, -3.0, -0.5, -4.0, 2.0, -1.0],
+            "kidney_left_center_y_rel": [0.0] * 8,
+            "kidney_right_center_y_rel": [0.0] * 8,
+            "kidney_left_center_z_rel": [0.0] * 8,
+            "kidney_right_center_z_rel": [0.0] * 8,
+            "body_width_mm": [300.0] * 8,
+            "body_depth_mm": [200.0] * 8,
+            "spine_center_x": [70.0] * 8,
+            "spine_center_y": [20.0] * 8,
+            "spine_center_z": [-50.0] * 8,
+            "body_com_x": [72.0] * 8,
+            "body_com_y": [22.0] * 8,
+            "body_com_z": [-50.0] * 8,
+        }
+    )
+    reference = build_reference_stats(ref)
+    collapsed = pd.DataFrame(
+        {
+            "kidney_left_center_x_rel": [0.0] * 8,
+            "kidney_right_center_x_rel": [0.0] * 8,
+            "kidney_left_center_y_rel": [1.0] * 8,
+            "kidney_right_center_y_rel": [-1.0] * 8,
+            "kidney_left_center_z_rel": [0.0] * 8,
+            "kidney_right_center_z_rel": [0.0] * 8,
+            "body_width_mm": [310.0] * 8,
+            "body_depth_mm": [210.0] * 8,
+            "spine_center_x": [0.0] * 8,
+            "spine_center_y": [0.0] * 8,
+            "spine_center_z": [0.0] * 8,
+            "body_com_x": [0.0] * 8,
+            "body_com_y": [0.0] * 8,
+            "body_com_z": [0.0] * 8,
+        }
+    )
+    aligned = harmonize_dataframe(collapsed, reference, source_kind="dicom_lps")
+    assert aligned["kidney_left_center_x_rel"].abs().max() < 1e-9
+    assert aligned["kidney_right_center_x_rel"].abs().max() < 1e-9
+

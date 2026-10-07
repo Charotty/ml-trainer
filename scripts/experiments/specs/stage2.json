@@ -1,0 +1,5 @@
+[
+  {"run_id": "2_yz_off", "args": ["--stage", "2", "--tag", "yz_off", "--change", "yz_target_boost выключен", "--model-kind", "ensemble", "--estimator-profile", "production", "--enrichment-mode", "na_trends", "--yz-boost-mode", "off"]},
+  {"run_id": "2_yz_soft", "args": ["--stage", "2", "--tag", "yz_soft", "--change", "yz_target_boost мягкий (вес 1..2, насыщение на 30/24 мм)", "--model-kind", "ensemble", "--estimator-profile", "production", "--enrichment-mode", "na_trends", "--yz-boost-mode", "soft"]},
+  {"run_id": "2_yz_y_only", "args": ["--stage", "2", "--tag", "yz_y_only", "--change", "yz_target_boost только для Y", "--model-kind", "ensemble", "--estimator-profile", "production", "--enrichment-mode", "na_trends", "--yz-boost-mode", "y_only"]}
+]

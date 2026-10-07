@@ -3,6 +3,7 @@
 
 numpy>=1.21.0,<2.3
 pandas>=1.3.0,<3
+# sklearn pin for CPU image. Archive cards recorded 1.9.0 — see docs/MODEL_CARD.md.
 scikit-learn>=1.0.0,<1.6
 joblib>=1.1.0
 scipy>=1.7.0,<1.16

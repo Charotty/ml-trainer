@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -72,7 +73,16 @@ class CaseStorage:
         path = self.case_dir(case_id) / "meta.json"
         if not path.exists():
             raise FileNotFoundError(f"Case not found: {case_id}")
-        return json.loads(path.read_text(encoding="utf-8"))
+        last_error: Exception | None = None
+        for _ in range(10):
+            text = path.read_text(encoding="utf-8").strip()
+            if text:
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError as exc:
+                    last_error = exc
+            time.sleep(0.05)
+        raise FileNotFoundError(f"Case meta unreadable: {case_id}") from last_error
 
     def update_meta(self, case_id: str, **fields: Any) -> Dict[str, Any]:
         meta = self.get_meta(case_id)
@@ -84,7 +94,10 @@ class CaseStorage:
     def _write_meta(self, case_id: str, meta: Dict[str, Any]) -> None:
         path = self.case_dir(case_id) / "meta.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        payload = json.dumps(meta, indent=2, ensure_ascii=False)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(path)
 
     @staticmethod
     def _safe_zip_member_path(member_name: str, dicom_dir: Path) -> Path | None:

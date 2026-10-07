@@ -15,6 +15,12 @@ from src.visualization.displacement_plots import (  # noqa: E402
     build_case_report_pdf,
     quality_checks,
 )
+from src.visualization.report_contract import DISCLAIMER
+
+
+def test_disclaimer_does_not_claim_a_winner() -> None:
+    assert "кандидат" in DISCLAIMER.lower() or "не production" in DISCLAIMER.lower()
+    assert "победител" in DISCLAIMER
 
 
 def test_quality_checks_pass_for_typical_prediction() -> None:
