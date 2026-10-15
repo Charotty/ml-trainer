@@ -89,6 +89,7 @@ class NaTrendStore:
         boku_df: pd.DataFrame | None = None,
         kits_df: pd.DataFrame | None = None,
         include_kits: bool = False,
+        include_population_shift: bool = True,
         spine_path: str = "",
         boku_path: str = "",
         kits_path: str = "",
@@ -126,15 +127,16 @@ class NaTrendStore:
                 if np.isfinite(med):
                     store.kits_delta_medians[f"kits_cohort_median_{target}"] = float(med)
 
-        for side in POP_SHIFT_SIDES:
-            for axis in POP_SHIFT_AXES:
-                col = f"kidney_{side}_center_{axis}_rel"
-                sup = store.supine_stats.get(col, {}).get("median", np.nan)
-                lat = store.lateral_stats.get(col, {}).get("median", np.nan)
-                key = f"na_pop_shift_{side}_{axis}"
-                store.population_shift[key] = (
-                    float(lat - sup) if np.isfinite(sup) and np.isfinite(lat) else np.nan
-                )
+        if include_population_shift:
+            for side in POP_SHIFT_SIDES:
+                for axis in POP_SHIFT_AXES:
+                    col = f"kidney_{side}_center_{axis}_rel"
+                    sup = store.supine_stats.get(col, {}).get("median", np.nan)
+                    lat = store.lateral_stats.get(col, {}).get("median", np.nan)
+                    key = f"na_pop_shift_{side}_{axis}"
+                    store.population_shift[key] = (
+                        float(lat - sup) if np.isfinite(sup) and np.isfinite(lat) else np.nan
+                    )
         return store
 
     @classmethod
@@ -145,6 +147,7 @@ class NaTrendStore:
         boku_path: Path | str | None = None,
         kits_path: Path | str | None = None,
         include_kits: bool = False,
+        include_population_shift: bool = True,
     ) -> NaTrendStore:
         sp_p = _resolve_path(
             Path(spine_path) if spine_path else DEFAULT_SPINE_PATH,
@@ -168,6 +171,7 @@ class NaTrendStore:
             boku_df=boku_df,
             kits_df=kits_df,
             include_kits=bool(kt_p),
+            include_population_shift=include_population_shift,
             spine_path=str(sp_p) if sp_p else "",
             boku_path=str(bk_p) if bk_p else "",
             kits_path=str(kt_p) if kt_p else "",

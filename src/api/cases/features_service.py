@@ -20,6 +20,7 @@ from src.features.ct_geometry import (  # noqa: E402
     harmonize_ct_to_clinical_frame,
     sanitize_body_size_for_clinical_model,
 )
+from src.features.table_frame import align_ct_to_table_frame  # noqa: E402
 from src.features.na_trend_features import NaTrendStore  # noqa: E402
 from src.features.displacement_axis_features import ANATOMICAL_FEATURES  # noqa: E402
 from src.features.laterality import (  # noqa: E402
@@ -77,6 +78,7 @@ _FRAME_KEYS = (
     "patient_position",
     "scan_position",
     "feature_frame",
+    "table_frame_source",
     "geometry_ood_x",
     "geometry_ood_x_reasons",
     "mid_sagittal_x",
@@ -142,7 +144,8 @@ def build_features_from_base(
     # Normalize first (aliases / abs→rel), then overwrite geometry with the
     # clinical Excel/Vybor frame so LPS vertebral-spine distances do not leak in.
     df = normalize_dataframe(pd.DataFrame([base_row]))
-    row = attach_laterality(harmonize_ct_to_clinical_frame(df.iloc[0].to_dict()))
+    aligned = align_ct_to_table_frame(df.iloc[0].to_dict())
+    row = attach_laterality(harmonize_ct_to_clinical_frame(aligned))
     row = sanitize_body_size_for_clinical_model(row)
     df = _apply_ct_enrichment(pd.DataFrame([row]))
     if payload is not None:

@@ -110,6 +110,17 @@ def _body_only_volume(seg_dir: Path) -> Optional[AnatomyVolume]:
     return AnatomyVolume(affine=np.asarray(img.affine, dtype=float), masks={"body_trunc": data})
 
 
+def vertebral_frame_from_seg_dir(
+    seg_dir: Path,
+    hu_nifti: Optional[Path] = None,
+) -> Dict[str, object]:
+    """Measure ``*_vert`` from masks already on disk. Empty folder → {}."""
+    volume = load_anatomy_volume(Path(seg_dir), Path(hu_nifti) if hu_nifti else None)
+    if volume is None:
+        return {"vert_origin_qc": "missing", "vertebral_frame_error": "no_masks"}
+    return measure_vertebral_frame(volume)
+
+
 def extract_anatomy_from_seg_dir(
     seg_dir: Path,
     hu_nifti: Optional[Path] = None,

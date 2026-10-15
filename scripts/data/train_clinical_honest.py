@@ -21,6 +21,11 @@ if str(ROOT) not in sys.path:
 from src.models.ensemble import AdaptiveEnsembleTrainer  # noqa: E402
 from src.data.xlsx_displacement_parser import DEFAULT_OUTPUT_CSV  # noqa: E402
 from src.features.na_trend_features import NaTrendStore  # noqa: E402
+from src.features.table_frame import (  # noqa: E402
+    Z_TARGET_NAMES,
+    constant_target_baseline,
+    geometry_ranges_from_frame,
+)
 from src.features.phase1_schema import (  # noqa: E402
     TARGET_NAMES,
     filter_any_kidney_targets,
@@ -36,7 +41,7 @@ DEFAULT_MODEL_PATH = ROOT / "models" / "adaptive_ensemble_clinical_honest.pkl"
 SEED = 42
 N_SPLITS = 5
 N_BOOTSTRAP = 2000
-Z_TARGETS = ["kidney_left_delta_z", "kidney_right_delta_z"]
+Z_TARGETS = list(Z_TARGET_NAMES)
 
 
 def _bootstrap_ci(per_patient_avg: np.ndarray, n_boot: int = N_BOOTSTRAP) -> tuple[float, float]:
@@ -191,6 +196,13 @@ def main() -> int:
         action="store_true",
         help="Skip nested OOF after the final fit (use when CV is already in the journal)",
     )
+    parser.add_argument(
+        "--trend-reference",
+        choices=("table", "cohort"),
+        default="table",
+        help="table: z-score clinical rows against themselves and drop na_pop_shift. "
+        "cohort: legacy na_spine/na_boku scale (train/serve mismatch).",
+    )
     args = parser.parse_args()
     z_head = args.z_head
     model_path = args.model_path or (
@@ -235,12 +247,24 @@ def main() -> int:
 
     assert_no_holdout_leak(df)
 
-    na_trends = NaTrendStore.fit(
-        spine_path=args.spine_csv,
-        boku_path=args.boku_csv,
-        include_kits=args.with_kits,
-    )
+    if args.trend_reference == "table":
+        na_trends = NaTrendStore.fit_from_frames(
+            spine_df=df,
+            include_kits=False,
+            include_population_shift=False,
+            spine_path="clinical_table_frame",
+        )
+        print("[na_trends] reference=clinical table; na_pop_shift off")
+    else:
+        na_trends = NaTrendStore.fit(
+            spine_path=args.spine_csv,
+            boku_path=args.boku_csv,
+            include_kits=args.with_kits,
+        )
     print(f"[na_trends] {json.dumps(na_trends.describe(), ensure_ascii=False)}")
+    z_baseline = constant_target_baseline(df, Z_TARGETS)
+    geometry_ranges = geometry_ranges_from_frame(df)
+    print(f"[z-baseline] {json.dumps(z_baseline, ensure_ascii=False)}")
 
     spine_eq_com = all(
         np.allclose(df[f"spine_center_{a}"], df[f"body_com_{a}"], atol=1e-3)
@@ -310,6 +334,11 @@ def main() -> int:
                 "model_kind": trainer.model_kind,
                 "yz_boost_mode": getattr(trainer, "yz_boost_mode", None),
                 "variant_a_config": str(args.config) if args.config else None,
+                "trend_reference": args.trend_reference,
+                "z_baseline_mean": {t: z_baseline[t]["mean_mm"] for t in z_baseline},
+                "z_baseline_mae_mm": {t: z_baseline[t]["mae_mm"] for t in z_baseline},
+                "z_shrink_targets": [],
+                "geometry_ranges": geometry_ranges,
             },
         },
     )
@@ -331,6 +360,18 @@ def main() -> int:
         }
     else:
         oof_report = evaluate_groupkfold_oof(df, z_head=z_head, na_trend_store=na_trends)
+    oof_mae = dict(oof_report.get("per_target_mae_mm") or {})
+    shrink_targets = []
+    if not args.skip_oof:
+        for target, stats in z_baseline.items():
+            model_mae = oof_mae.get(target)
+            if model_mae is not None and float(model_mae) >= float(stats["mae_mm"]):
+                shrink_targets.append(target)
+    payload["training_meta"]["z_shrink_targets"] = shrink_targets
+    if shrink_targets:
+        print(f"[z-baseline] serving constant for {shrink_targets}")
+    joblib.dump(payload, model_path)
+    print(f"[OK] updated {model_path} with Z policy")
     oof_metrics = {
         k: oof_report[k]
         for k in (
@@ -356,6 +397,10 @@ def main() -> int:
         },
         "z_head": z_head,
         "z_driver_names": trainer.z_driver_names,
+        "z_constant_baseline": z_baseline,
+        "z_shrink_targets": shrink_targets,
+        "geometry_ranges": geometry_ranges,
+        "trend_reference": args.trend_reference,
         "groupkfold_oof_87": oof_metrics,
         "nested_groupkfold_oof": oof_report,
     }

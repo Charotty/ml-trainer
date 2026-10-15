@@ -22,6 +22,36 @@ _lock = threading.Lock()
 _running: set[str] = set()
 
 
+def build_extraction_command(
+    *,
+    dicom_dir: Path,
+    work_dir: Path,
+    case_id: str,
+    result_path: Path,
+    fast: bool,
+) -> list[str]:
+    """Argv for the isolated extractor. ``--fast`` still measures ``*_vert``."""
+    cmd = [
+        sys.executable,
+        "-m",
+        "src.api.cases.extraction_runner",
+        "--dicom-dir",
+        str(dicom_dir),
+        "--work-dir",
+        str(work_dir),
+        "--case-id",
+        case_id,
+        "--output",
+        str(result_path),
+        "--device",
+        "auto",
+        "--vertebral-frame",
+    ]
+    if fast:
+        cmd.append("--fast")
+    return cmd
+
+
 def is_analyze_running(case_id: str) -> bool:
     with _lock:
         return case_id in _running
@@ -59,23 +89,13 @@ def run_analyze_job(
             storage.update_meta(case_id, progress_pct=30.0, stage="segmentation", message="Running extraction")
 
             result_path = work_dir / "extraction_result.json"
-            cmd = [
-                sys.executable,
-                "-m",
-                "src.api.cases.extraction_runner",
-                "--dicom-dir",
-                str(dicom_dir),
-                "--work-dir",
-                str(work_dir),
-                "--case-id",
-                case_id,
-                "--output",
-                str(result_path),
-                "--device",
-                "auto",
-            ]
-            if fast:
-                cmd.append("--fast")
+            cmd = build_extraction_command(
+                dicom_dir=dicom_dir,
+                work_dir=work_dir,
+                case_id=case_id,
+                result_path=result_path,
+                fast=fast,
+            )
             proc = subprocess.run(
                 cmd,
                 cwd=str(REPO_ROOT),

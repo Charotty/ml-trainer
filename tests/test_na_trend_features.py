@@ -42,6 +42,35 @@ def test_na_trend_kits_optional():
     assert any(k.startswith("kits_cohort_median_") for k in store.kits_delta_medians)
 
 
+def test_table_reference_drops_population_shift_and_shares_scale():
+    clinical = pd.DataFrame(
+        [
+            {
+                "kidney_left_center_z_rel": -2.0,
+                "kidney_left_supine_middle_z": -60.0,
+            },
+            {
+                "kidney_left_center_z_rel": 0.0,
+                "kidney_left_supine_middle_z": -50.0,
+            },
+            {
+                "kidney_left_center_z_rel": 2.0,
+                "kidney_left_supine_middle_z": -40.0,
+            },
+        ]
+    )
+    store = NaTrendStore.fit_from_frames(
+        spine_df=clinical,
+        include_population_shift=False,
+        spine_path="clinical_table_frame",
+    )
+    assert store.population_shift == {}
+    attached = store.attach(clinical)
+    assert not any(column.startswith("na_pop_shift_") for column in attached.columns)
+    median_row = attached.iloc[1]
+    assert abs(float(median_row["na_sup_z_kidney_left_center_z_rel"])) < 1e-6
+
+
 def test_na_trend_no_per_patient_lateral_join():
     store = NaTrendStore.fit()
     names = store.trend_feature_names()

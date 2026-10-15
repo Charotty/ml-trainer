@@ -96,9 +96,12 @@ from src.features.ct_anatomy import (  # noqa: E402
     run_anatomy_segmentation,
 )
 from src.features.ct_anatomy.abdomen import assign_clinical_body_size  # noqa: E402
-from src.features.ct_anatomy.extract import body_mask_fields_from_seg_dir  # noqa: E402
+from src.features.ct_anatomy.extract import (  # noqa: E402
+    body_mask_fields_from_seg_dir,
+    vertebral_frame_from_seg_dir,
+)
 from src.features.ct_anatomy.vertebral_frame import publish_vertebral_frame  # noqa: E402
-from src.features.ct_anatomy.segmentation import run_body_task  # noqa: E402
+from src.features.ct_anatomy.segmentation import run_body_task, run_vertebra_roi  # noqa: E402
 from src.features.ct_anatomy.profiles import PROFILE_FAST, PROFILE_FULL  # noqa: E402
 
 
@@ -128,6 +131,14 @@ def extract_dicom_metadata(dicom_file: Path) -> Dict[str, Any]:
     except Exception as exc:
         metadata["metadata_error"] = str(exc)
     return metadata
+
+
+def _row_has_vert_middle(row: Dict[str, Any]) -> bool:
+    """True when either kidney already has a middle point in the vertebral frame."""
+    for side in ("left", "right"):
+        if row.get(f"kidney_{side}_middle_z_vert") is not None:
+            return True
+    return False
 
 
 def _has_segmentation_output(output_folder: Path) -> bool:
@@ -288,6 +299,7 @@ def process_case(
     case_id: Optional[str] = None,
     keep_temp: bool = False,
     anatomy_profile: str = PROFILE_FAST,
+    vertebral_frame: bool = False,
 ) -> Dict[str, Any]:
     case_folder = Path(case_folder)
     case_id = case_id or (case_folder.stem if is_zip_case(case_folder) else case_folder.name)
@@ -311,6 +323,7 @@ def process_case(
             prep_only=prep_only,
             roi_subset=roi_subset,
             anatomy_profile=anatomy_profile,
+            vertebral_frame=vertebral_frame,
         )
     finally:
         if not keep_temp:
@@ -347,6 +360,7 @@ def _process_case_inner(
     prep_only: bool,
     roi_subset: Optional[Sequence[str]],
     anatomy_profile: str = PROFILE_FAST,
+    vertebral_frame: bool = False,
 ) -> Dict[str, Any]:
     prep = prepare_case(
         case_folder,
@@ -413,21 +427,28 @@ def _process_case_inner(
                 print(f"  anatomy measurement error: {exc}")
                 row["anatomy_error"] = str(exc)
         else:
-            if seg_dir.exists():
-                shutil.rmtree(seg_dir, ignore_errors=True)
             seg_dir.mkdir(parents=True, exist_ok=True)
-            ts_ok = run_totalsegmentator(
-                prep.nifti_file,
-                seg_dir,
-                fast=fast,
-                device=device,
-                roi_subset=roi_subset,
-            )
-            if ts_ok:
+            kidneys_cached = bool(reuse_nifti and list(seg_dir.glob("kidney_*.nii*")))
+            if not kidneys_cached and any(seg_dir.iterdir()):
+                shutil.rmtree(seg_dir, ignore_errors=True)
+                seg_dir.mkdir(parents=True, exist_ok=True)
+            if kidneys_cached:
                 kidney_feats = extract_kidney_features_from_ts_output(seg_dir)
-                row["totalsegmentator_status"] = "ok" if kidney_feats else "empty_masks"
+                ts_ok = bool(kidney_feats)
+                row["totalsegmentator_status"] = "cached" if ts_ok else "empty_masks"
             else:
-                row["totalsegmentator_status"] = "failed"
+                ts_ok = run_totalsegmentator(
+                    prep.nifti_file,
+                    seg_dir,
+                    fast=fast,
+                    device=device,
+                    roi_subset=roi_subset,
+                )
+                if ts_ok:
+                    kidney_feats = extract_kidney_features_from_ts_output(seg_dir)
+                    row["totalsegmentator_status"] = "ok" if kidney_feats else "empty_masks"
+                else:
+                    row["totalsegmentator_status"] = "failed"
         if profile != PROFILE_FULL:
             # Skin envelope for body_width / body_depth. Kidney masks stay in seg_dir.
             row.update(
@@ -481,6 +502,25 @@ def _process_case_inner(
 
     if seg_dir is not None and prep.nifti_file is not None:
         row.update(body_mask_fields_from_seg_dir(seg_dir, prep.nifti_file, row))
+    if (
+        vertebral_frame
+        and seg_dir is not None
+        and prep.nifti_file is not None
+        and not _row_has_vert_middle(row)
+    ):
+        row.update(
+            run_vertebra_roi(
+                prep.nifti_file,
+                seg_dir,
+                device=device,
+                reuse=True,
+            )
+        )
+        try:
+            row.update(vertebral_frame_from_seg_dir(seg_dir, prep.nifti_file))
+        except Exception as exc:
+            print(f"  vertebral frame error: {exc}")
+            row["vertebral_frame_error"] = str(exc)
     row.update(assign_clinical_body_size(row))
     row.update(publish_vertebral_frame(row))
 
