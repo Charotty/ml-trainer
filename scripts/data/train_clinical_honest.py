@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from src.models.ensemble import AdaptiveEnsembleTrainer  # noqa: E402
 from src.data.xlsx_displacement_parser import DEFAULT_OUTPUT_CSV  # noqa: E402
+from src.data.ct_feature_table import build_ct_labeled_frame  # noqa: E402
 from src.features.na_trend_features import NaTrendStore  # noqa: E402
 from src.features.phase1_schema import (  # noqa: E402
     TARGET_NAMES,
@@ -36,6 +37,7 @@ DEFAULT_MODEL_PATH = ROOT / "models" / "adaptive_ensemble_clinical_honest.pkl"
 SEED = 42
 N_SPLITS = 5
 N_BOOTSTRAP = 2000
+MIN_CT_PAIRS = 20
 Z_TARGETS = ["kidney_left_delta_z", "kidney_right_delta_z"]
 
 
@@ -191,13 +193,28 @@ def main() -> int:
         action="store_true",
         help="Skip nested OOF after the final fit (use when CV is already in the journal)",
     )
+    parser.add_argument(
+        "--feature-source",
+        choices=("table", "ct"),
+        default="table",
+        help="table: Excel geometry. ct: same-named columns from a CT extract, labels still from the sheet",
+    )
+    parser.add_argument(
+        "--ct-csv",
+        type=Path,
+        default=None,
+        help="CT extract CSV used when --feature-source ct (surname from case_id)",
+    )
     args = parser.parse_args()
     z_head = args.z_head
-    model_path = args.model_path or (
-        ROOT / "models" / "adaptive_ensemble_clinical_honest_v7.pkl"
-        if z_head == "quantile_v7"
-        else DEFAULT_MODEL_PATH
-    )
+    if args.feature_source == "ct" and args.model_path is None:
+        model_path = ROOT / "results" / "models" / "clinical_ct_features.pkl"
+    else:
+        model_path = args.model_path or (
+            ROOT / "models" / "adaptive_ensemble_clinical_honest_v7.pkl"
+            if z_head == "quantile_v7"
+            else DEFAULT_MODEL_PATH
+        )
     run_id = f"clinical_honest_{z_head}_{date.today().strftime('%Y%m%d')}"
 
     vybor_path = args.vybor_csv or DEFAULT_OUTPUT_CSV
@@ -230,6 +247,32 @@ def main() -> int:
         f"(both kidneys={both}, one-sided={len(df) - both}; "
         f"dropped {before - len(df)} with no labeled side)"
     )
+
+    if args.feature_source == "ct":
+        if args.ct_csv is None:
+            raise SystemExit("--feature-source ct requires --ct-csv")
+        ct_frame = pd.read_csv(args.ct_csv)
+        df, ct_counts = build_ct_labeled_frame(df, ct_frame)
+        df = filter_any_kidney_targets(normalize_dataframe(df)).reset_index(drop=True)
+        print(f"[ct] {json.dumps(ct_counts, ensure_ascii=False)}")
+        print(f"[ct] paired patients with a labeled kidney={len(df)}")
+        if len(df) < MIN_CT_PAIRS:
+            status = {
+                "feature_source": "ct",
+                "ct_csv": str(args.ct_csv),
+                "trained": False,
+                "reason": (
+                    f"only {len(df)} surname pairs; nested GroupKFold needs at least {MIN_CT_PAIRS}"
+                ),
+                "counts": ct_counts,
+                "model_path": None,
+            }
+            status_path = Path(model_path).with_name("clinical_ct_features_status.json")
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            status_path.write_text(json.dumps(status, indent=2, ensure_ascii=False), encoding="utf-8")
+            print(json.dumps(status, indent=2, ensure_ascii=False))
+            print(f"[ct] not trained; wrote {status_path}")
+            return 0
 
     from src.data.holdout import assert_no_holdout_leak  # noqa: E402
 
