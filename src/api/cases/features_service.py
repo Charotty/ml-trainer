@@ -78,6 +78,7 @@ _FRAME_KEYS = (
     "patient_position",
     "scan_position",
     "feature_frame",
+    "table_frame_source",
     "geometry_ood_x",
     "geometry_ood_x_reasons",
     "mid_sagittal_x",
