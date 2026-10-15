@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT="/mnt/e/ml/ml-trainer"
-VENV="/home/user/venv-ml-trainer"
+ROOT="/mnt/d/ml-trainer"
+VENV="/root/ml-trainer-venv"
 LOG="/tmp/ct_workbench_uvicorn.log"
 cd "$ROOT"
 pkill -f "uvicorn src.api.ct_workbench_api:app" || true

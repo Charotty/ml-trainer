@@ -6,7 +6,12 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence
 
-from src.features.ct_anatomy.profiles import FULL_TASKS, PROFILE_FAST, PROFILE_FULL
+from src.features.ct_anatomy.profiles import (
+    FULL_TASKS,
+    PROFILE_FAST,
+    PROFILE_FULL,
+    VERTEBRA_FRAME_ROI,
+)
 
 Runner = Callable[..., bool]
 
@@ -124,6 +129,36 @@ def run_body_task(
         device=device,
     )
     return {"anatomy_seg_status_body": "ok" if ok else "failed"}
+
+
+def run_vertebra_roi(
+    nifti_path: Path,
+    seg_dir: Path,
+    *,
+    device: str = "auto",
+    reuse: bool = True,
+    runner: Optional[Runner] = None,
+) -> Dict[str, Any]:
+    """Segment named vertebrae into ``seg_dir/total`` for the ``*_vert`` frame.
+
+    Kidney masks already in ``seg_dir`` are left in place. A cached
+    ``vertebrae_L3`` mask skips TotalSegmentator.
+    """
+    seg_dir = Path(seg_dir)
+    out = seg_dir / "total"
+    cached = out / "vertebrae_L3.nii.gz"
+    if reuse and (cached.exists() or (out / "vertebrae_L3.nii").exists()):
+        return {"anatomy_seg_status_vertebrae": "cached"}
+    call = runner or default_totalsegmentator_runner
+    ok = call(
+        input_path=Path(nifti_path),
+        output=out,
+        task="total",
+        roi_subset=VERTEBRA_FRAME_ROI,
+        fast=True,
+        device=device,
+    )
+    return {"anatomy_seg_status_vertebrae": "ok" if ok else "failed"}
 
 
 def run_anatomy_segmentation(

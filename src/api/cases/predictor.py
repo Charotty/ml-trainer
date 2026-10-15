@@ -16,6 +16,7 @@ from src.features.laterality import (
     targets_for_side,
 )
 from src.features.phase1_schema import BASE_FEATURES, TARGET_NAMES, normalize_dataframe
+from src.features.table_frame import Z_TARGET_NAMES, flag_table_geometry_ood
 from src.models.runtime import RuntimePredictor, default_model_path
 
 DEFAULT_MODEL_PATH = default_model_path()
@@ -131,6 +132,54 @@ def apply_laterality_gate(
     return out, flags, withheld, notes
 
 
+def _flag_on(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return bool(value)
+
+
+def apply_z_policy(
+    predictions: Mapping[str, Any],
+    row: Mapping[str, Any],
+    payload: Mapping[str, Any] | None,
+) -> tuple[Dict[str, Any], List[str], bool]:
+    """Serve the training-mean ΔZ when geometry is outside the sheet, or when Z lost to a constant.
+
+    Returns (predictions, notes, geometry_ood).
+    """
+    meta = dict((payload or {}).get("training_meta") or {})
+    means = dict(meta.get("z_baseline_mean") or {})
+    ranges = dict(meta.get("geometry_ranges") or {})
+    shrink = set(meta.get("z_shrink_targets") or [])
+    out: Dict[str, Any] = dict(predictions)
+    notes: List[str] = []
+    z_ood, z_reasons = flag_table_geometry_ood(row, ranges)
+    ood_x = _flag_on(row.get("geometry_ood_x"))
+    geometry_ood = bool(ood_x or z_ood)
+    if ood_x:
+        reasons = row.get("geometry_ood_x_reasons") or []
+        if isinstance(reasons, str):
+            reasons = [reasons]
+        detail = "; ".join(str(item) for item in reasons)
+        notes.append("geometry_ood_x" + (f": {detail}" if detail else ""))
+    notes.extend(z_reasons)
+    for target in Z_TARGET_NAMES:
+        if out.get(target) is None or target not in means:
+            continue
+        if geometry_ood or target in shrink:
+            out[target] = float(means[target])
+            why = "геометрия вне обучающего диапазона" if geometry_ood else "константа лучше модели на OOF"
+            notes.append(f"{target}: {why}, выдано среднее {float(means[target]):.2f} мм")
+    return out, notes, geometry_ood
+
+
 def finalize_case_predictions(
     *,
     row: Mapping[str, Any],
@@ -139,10 +188,13 @@ def finalize_case_predictions(
     payload: Mapping[str, Any] | None = None,
 ) -> tuple[Dict[str, Any], bool, List[str], Dict[str, str], List[str]]:
     gated, flags, withheld, notes = apply_laterality_gate(predictions, row)
+    adjusted, policy_notes, geometry_ood = apply_z_policy(gated, row, payload)
     sanity_ok, warnings = assess_prediction_sanity(
-        gated, all_features=all_features, payload=payload
+        adjusted, all_features=all_features, payload=payload
     )
-    return gated, sanity_ok, notes + warnings, flags, withheld
+    if geometry_ood:
+        sanity_ok = False
+    return adjusted, sanity_ok, notes + policy_notes + warnings, flags, withheld
 
 
 @dataclass

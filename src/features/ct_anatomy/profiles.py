@@ -62,6 +62,12 @@ FULL_TASKS: Tuple[TaskSpec, ...] = (
 
 VERTEBRA_LEVELS: Tuple[str, ...] = ("L1", "L2", "L3", "L4", "L5", "S1")
 
+# Named vertebrae are enough for ``*_vert`` (the body task is the fallback).
+# The 3 mm total model can emit these without the CPU ``vertebrae_body`` task.
+VERTEBRA_FRAME_ROI: Tuple[str, ...] = tuple(
+    name for name in TOTAL_ROI if name.startswith("vertebrae_") or name == "sacrum"
+)
+
 # Relative paths under the segmentation directory. First existing file wins.
 MASK_FILES: dict[str, Tuple[str, ...]] = {
     "kidney_left": ("total/kidney_left.nii.gz", "kidney_left.nii.gz"),

@@ -22,6 +22,16 @@ def main() -> int:
     parser.add_argument("--case-id", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--fast", action="store_true")
+    parser.add_argument(
+        "--vertebral-frame",
+        action="store_true",
+        help="Measure kidney *_vert even when --fast skips the full anatomy profile",
+    )
+    parser.add_argument(
+        "--no-vertebral-frame",
+        action="store_true",
+        help="Skip the vertebral frame (debug only)",
+    )
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "gpu"])
     parser.add_argument("--reuse-nifti", action="store_true")
     args = parser.parse_args()
@@ -40,6 +50,7 @@ def main() -> int:
         device=args.device,
         keep_temp=True,
         reuse_nifti=reuse_nifti,
+        vertebral_frame=args.vertebral_frame or not args.no_vertebral_frame,
     )
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
