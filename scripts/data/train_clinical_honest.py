@@ -243,9 +243,36 @@ def main() -> int:
         f"dropped {before - len(df)} with no labeled side)"
     )
 
+    from src.data.ct_profile_bank import (  # noqa: E402
+        attach_predictors,
+        bank_from_frames,
+        load_profile,
+        match_counts,
+    )
     from src.data.holdout import assert_no_holdout_leak  # noqa: E402
+    from src.data.xlsx_displacement_parser import parse_xlsx_raw_table  # noqa: E402
 
     assert_no_holdout_leak(df)
+
+    ct_profile_bank = None
+    spine_profile = args.spine_csv or (ROOT / "na_spine_full_profile.csv")
+    boku_profile = args.boku_csv or (ROOT / "na_boku_full_profile.csv")
+    if Path(spine_profile).exists() and Path(boku_profile).exists() and args.xlsx is not None and Path(args.xlsx).exists():
+        supine = load_profile(spine_profile)
+        lateral = load_profile(boku_profile)
+        ct_profile_bank = bank_from_frames(supine, lateral)
+        sheet = parse_xlsx_raw_table(args.xlsx, exclude_surnames=[])
+        counts = match_counts(sheet, supine, lateral)
+        ct_profile_bank["match_counts"] = counts
+        df = attach_predictors(
+            df,
+            supine,
+            lateral,
+            ct_profile_bank["supine_stats"],
+            ct_profile_bank["lateral_stats"],
+        )
+        filled = int(df["ct_lat_kidney_left_volume_cm3"].notna().sum()) if "ct_lat_kidney_left_volume_cm3" in df.columns else 0
+        print(f"[ct-bank] {json.dumps(counts, ensure_ascii=False)} lateral_volume_rows={filled}")
 
     if args.trend_reference == "table":
         na_trends = NaTrendStore.fit_from_frames(
@@ -339,6 +366,7 @@ def main() -> int:
                 "z_baseline_mae_mm": {t: z_baseline[t]["mae_mm"] for t in z_baseline},
                 "z_shrink_targets": [],
                 "geometry_ranges": geometry_ranges,
+                "ct_profile_bank": ct_profile_bank,
             },
         },
     )

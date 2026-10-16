@@ -1,0 +1,203 @@
+{
+  "supine_rows": 130,
+  "lateral_rows": 132,
+  "supine_stats": {
+    "kidney_left_volume_cm3": {
+      "median": 179.5577934980193,
+      "mad": 31.709199353956876,
+      "q10": 119.37006981760007,
+      "q90": 259.0807453203062,
+      "n": 109
+    },
+    "kidney_right_volume_cm3": {
+      "median": 179.40469705676435,
+      "mad": 34.53589163121467,
+      "q10": 129.18792930524208,
+      "q90": 259.88712440175397,
+      "n": 113
+    },
+    "kidney_left_middle_x_vert": {
+      "median": 82.66253061439137,
+      "mad": 7.926696463820349,
+      "q10": 64.23377566806481,
+      "q90": 96.63872103512185,
+      "n": 109
+    },
+    "kidney_left_middle_y_vert": {
+      "median": 6.152791379392021,
+      "mad": 12.95026801997907,
+      "q10": -15.450830391621377,
+      "q90": 31.353691778936604,
+      "n": 109
+    },
+    "kidney_left_middle_z_vert": {
+      "median": 3.143648857691005,
+      "mad": 5.358528360907258,
+      "q10": -9.215759106947507,
+      "q90": 13.343908258748343,
+      "n": 109
+    },
+    "kidney_right_middle_x_vert": {
+      "median": 78.43825216140019,
+      "mad": 7.601860860858409,
+      "q10": 65.33584032444823,
+      "q90": 91.35145581534243,
+      "n": 113
+    },
+    "kidney_right_middle_y_vert": {
+      "median": 7.736220540399669,
+      "mad": 12.331220970443168,
+      "q10": -12.269620714647537,
+      "q90": 36.27107481631633,
+      "n": 113
+    },
+    "kidney_right_middle_z_vert": {
+      "median": -2.3587835944672406,
+      "mad": 5.493413914621215,
+      "q10": -13.439013762142348,
+      "q90": 9.297417544995184,
+      "n": 113
+    },
+    "kidney_left_medial_to_spine_vert_mm": {
+      "median": 18.37221841255874,
+      "mad": 9.785892177788508,
+      "q10": 0.9013250917287224,
+      "q90": 31.226673062558326,
+      "n": 101
+    },
+    "kidney_right_medial_to_spine_vert_mm": {
+      "median": 15.3548189919133,
+      "mad": 7.17411052476837,
+      "q10": 1.2961342045796465,
+      "q90": 28.01976357178306,
+      "n": 102
+    },
+    "kidney_left_psoas_area_vert_cm2": {
+      "median": 1.7676597751104364,
+      "mad": 0.6829200668218667,
+      "q10": 0.6961736359237933,
+      "q90": 3.5075951325292714,
+      "n": 103
+    },
+    "kidney_right_psoas_area_vert_cm2": {
+      "median": 2.0669634231025853,
+      "mad": 0.873725789890391,
+      "q10": 0.6385055709664235,
+      "q90": 3.6703770997381957,
+      "n": 110
+    },
+    "body_volume_cm3": {
+      "median": 44.285252199619734,
+      "mad": 11.168725638218994,
+      "q10": 24.320992538286482,
+      "q90": 64.17080362852607,
+      "n": 120
+    },
+    "fat_volume_cm3": {
+      "median": 22.288709802677104,
+      "mad": 7.269249858738581,
+      "q10": 8.625503055386215,
+      "q90": 33.26457184390445,
+      "n": 120
+    }
+  },
+  "lateral_stats": {
+    "kidney_left_volume_cm3": {
+      "median": 156.69418081456178,
+      "mad": 28.265200278877757,
+      "q10": 104.04095962908153,
+      "q90": 228.26744442442816,
+      "n": 122
+    },
+    "kidney_right_volume_cm3": {
+      "median": 149.77495485509442,
+      "mad": 27.723867156930098,
+      "q10": 111.81793151462965,
+      "q90": 234.28241850858856,
+      "n": 125
+    },
+    "kidney_left_psoas_area_vert_cm2": {
+      "median": 1.664629057763086,
+      "mad": 0.5582211103917243,
+      "q10": 0.7452436379437977,
+      "q90": 2.797754863051394,
+      "n": 114
+    },
+    "kidney_right_psoas_area_vert_cm2": {
+      "median": 2.0962926363769423,
+      "mad": 0.717305320629218,
+      "q10": 0.8638977554456444,
+      "q90": 4.084350646776382,
+      "n": 118
+    },
+    "body_volume_cm3": {
+      "median": 39.45415467301285,
+      "mad": 9.049204164965465,
+      "q10": 25.14511564353455,
+      "q90": 58.615369101277544,
+      "n": 132
+    },
+    "fat_volume_cm3": {
+      "median": 19.10246611512242,
+      "mad": 5.453591509943271,
+      "q10": 8.629738480295762,
+      "q90": 30.270930316801746,
+      "n": 132
+    },
+    "kidney_left_medial_to_spine_vert_mm": {
+      "median": 14.013007828830034,
+      "mad": 8.163078551160204,
+      "q10": -2.00611110954056,
+      "q90": 29.98756534323063,
+      "n": 114
+    },
+    "kidney_right_medial_to_spine_vert_mm": {
+      "median": 12.507235664389112,
+      "mad": 8.617057440502352,
+      "q10": -8.15122200607534,
+      "q90": 27.648185512035916,
+      "n": 116
+    }
+  },
+  "supine_columns": [
+    "kidney_left_volume_cm3",
+    "kidney_right_volume_cm3",
+    "kidney_left_middle_x_vert",
+    "kidney_left_middle_y_vert",
+    "kidney_left_middle_z_vert",
+    "kidney_right_middle_x_vert",
+    "kidney_right_middle_y_vert",
+    "kidney_right_middle_z_vert",
+    "kidney_left_medial_to_spine_vert_mm",
+    "kidney_right_medial_to_spine_vert_mm",
+    "kidney_left_psoas_area_vert_cm2",
+    "kidney_right_psoas_area_vert_cm2",
+    "body_volume_cm3",
+    "fat_volume_cm3"
+  ],
+  "lateral_columns": [
+    "kidney_left_volume_cm3",
+    "kidney_right_volume_cm3",
+    "kidney_left_psoas_area_vert_cm2",
+    "kidney_right_psoas_area_vert_cm2",
+    "body_volume_cm3",
+    "fat_volume_cm3",
+    "kidney_left_medial_to_spine_vert_mm",
+    "kidney_right_medial_to_spine_vert_mm"
+  ],
+  "match_counts": {
+    "sheet_rows": 130,
+    "supine_rows": 130,
+    "lateral_rows": 132,
+    "matched_supine": 4,
+    "matched_lateral": 114,
+    "supine_only": 126,
+    "lateral_only": 18,
+    "supine_and_lateral": 4
+  },
+  "lateral_middle_bias_ct_minus_sheet": {
+    "x": 11.238306740356421,
+    "y": -38.79041232604948,
+    "z": 62.5882837321149
+  }
+}

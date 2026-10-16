@@ -201,6 +201,10 @@ def create_cases_router(
             all_features=feat_doc.get("all_features") or {},
             payload=pred.payload,
         )
+        from src.data.ct_profile_bank import cohort_indicators_for_case
+
+        raw = storage.read_json_artifact(case_id, "extraction_raw.json") or {}
+        cohort_indicators = cohort_indicators_for_case(base, raw)
         storage.write_json_artifact(
             case_id,
             "prediction.json",
@@ -213,6 +217,7 @@ def create_cases_router(
                 "warnings": warnings,
                 "laterality": laterality,
                 "withheld_targets": withheld,
+                "cohort_indicators": cohort_indicators,
             },
         )
         storage.update_meta(case_id, status="predicted")
@@ -225,6 +230,7 @@ def create_cases_router(
             warnings=warnings,
             laterality=laterality,
             withheld_targets=withheld,
+            cohort_indicators=cohort_indicators,
         )
 
     @router.get("/{case_id}/prediction")

@@ -48,6 +48,7 @@ class PredictResponse(BaseModel):
     warnings: List[str] = Field(default_factory=list)
     laterality: Dict[str, str] = Field(default_factory=dict)
     withheld_targets: List[str] = Field(default_factory=list)
+    cohort_indicators: Dict[str, Optional[float]] = Field(default_factory=dict)
 
 
 class CaseSummary(BaseModel):

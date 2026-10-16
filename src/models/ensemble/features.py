@@ -198,6 +198,8 @@ class FeatureTransformer:
             or c.startswith("kits_z_")
             or c.startswith("kits_pct_")
             or c.startswith("kits_cohort_median_")
+            or c.startswith("ct_sup_")
+            or c.startswith("ct_lat_")
         )
         self.projection_features = projection_feature_cols
         self.na_trend_feature_cols = na_trend_feature_cols
